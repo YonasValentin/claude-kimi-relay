@@ -1,6 +1,12 @@
 # Claude Kimi Relay
 
-Claude Code stays the lead agent and hands specific jobs to Kimi Code over ACP: an independent review, an adversarial critique of a design, or an implementation done in an isolated copy and returned as a patch you apply yourself.
+[![CI](https://github.com/YonasValentin/claude-kimi-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/YonasValentin/claude-kimi-relay/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](./LICENSE)
+[![Node.js >= 22.14](https://img.shields.io/badge/node-%3E%3D22.14-brightgreen.svg)](https://nodejs.org)
+[![code style: prettier](https://img.shields.io/badge/code_style-prettier-ff69b4.svg)](https://prettier.io)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
+
+A **Claude Code plugin** that keeps Claude as the lead agent and delegates a specific job to **Kimi Code over the [Agent Client Protocol](https://agentclientprotocol.com) (ACP)**: an independent code review, an adversarial critique of a design, or an implementation done in an isolated copy and returned as a Git patch you apply yourself. Kimi never touches your working tree until you say so.
 
 > Independent community project. Not affiliated with or endorsed by Anthropic or Moonshot AI.
 
@@ -9,6 +15,15 @@ Claude Code stays the lead agent and hands specific jobs to Kimi Code over ACP: 
 Moonshot documents a configuration that aims Claude Code's Anthropic-compatible API settings at Kimi. That swaps out the model driving your session, so you end up talking to Kimi instead of Claude.
 
 This does something else. Claude stays in charge and calls Kimi as a second agent when a second opinion is worth having. Two models from two vendors looking at the same code, and the disagreement between them is the useful part.
+
+## How this compares to other Kimi and ACP integrations
+
+Several projects connect Claude Code to a second CLI. They tend to take one of two shapes:
+
+- **Route the model.** Point Claude Code's API base at Kimi so Kimi answers instead of Claude. One model, swapped.
+- **Delegate through subagents or an MCP tool.** Hand a prompt to another CLI and read back its text.
+
+This project delegates over ACP and adds an isolation boundary. Before Kimi runs, the relay builds a separate two-commit repository from filtered snapshots, so Kimi sees your code but not your Git history or your credentials. Review and challenge tasks refuse writes. Implementation work comes back as a Git patch that only touches your project when you run `apply`. If you want a second agent on sensitive code without handing it your working tree, that boundary is the point.
 
 ## What you get
 
@@ -195,6 +210,28 @@ CI runs the same pipeline on Ubuntu, macOS, and Windows against Node 22 and 24.
 8. Do a live authenticated Kimi ACP run.
 9. Tag `vX.Y.Z` and check npm provenance once it publishes.
 
+## Contributing
+
+Bug reports, patches, and threat-model challenges are all welcome. Open an issue for anything security-related through GitHub private vulnerability reporting rather than a public issue (see [SECURITY.md](./SECURITY.md)).
+
+For code:
+
+```bash
+git clone https://github.com/YonasValentin/claude-kimi-relay
+cd claude-kimi-relay
+npm ci
+npm run verify   # Prettier, ESLint, strict tsc, tests, and both builds
+```
+
+A few conventions that keep review short:
+
+- Use Node.js 22 or 24, the versions CI runs.
+- Keep changes focused and add a test for anything with logic. `npm run verify` has to pass on Node 22 and 24.
+- Do not weaken path containment, the command policy, environment filtering, or isolated-workspace behaviour without updating [THREAT_MODEL.md](./THREAT_MODEL.md) in the same change.
+- Formatting is enforced, not debated. Prettier decides.
+
+Full detail in [CONTRIBUTING.md](./CONTRIBUTING.md). Contributions are licensed under Apache-2.0.
+
 ## License
 
-Apache-2.0.
+Apache-2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
