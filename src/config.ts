@@ -9,8 +9,12 @@ const DEFAULT_MAX_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_RESULT_BYTES = 10 * 1024 * 1024;
 
 function positiveInteger(value: string | undefined, fallback: number): number {
-  if (value === undefined || value.trim() === "") return fallback;
-  const parsed = Number.parseInt(value, 10);
+  if (value === undefined) return fallback;
+  const trimmed = value.trim();
+  // Require a pure integer: parseInt would read "5MB" as 5 and "30min" as 30,
+  // silently turning a generous limit into a near-zero one.
+  if (!/^\d+$/u.test(trimmed)) return fallback;
+  const parsed = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 

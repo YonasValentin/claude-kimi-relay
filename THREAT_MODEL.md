@@ -22,8 +22,9 @@
 - Delegate output is a binary Git patch relative to that baseline.
 - Publishing, pushes, commits, dependency installation, network utilities, privilege escalation, and common credential paths are denied by default.
 - Task JSON updates use atomic replacement and per-task cross-process locks.
-- Kimi inherits a small environment allowlist.
+- Kimi inherits a small environment allowlist, with credentials stripped from any forwarded proxy URL.
+- Copied symlinks are rewritten to workspace-relative targets, and the agent runs in its own process group so termination reaches any helper it spawned.
 
 ## Residual risks
 
-This is not an OS sandbox. A sufficiently creative command executed by the current user can bypass string-based command policy or access files available to that user. Malicious repositories can also execute code through existing project scripts. Use a disposable VM or container with restricted mounts and networking for untrusted repositories or high-value source code.
+This is not an OS sandbox. A sufficiently creative command executed by the current user can bypass string-based command policy or access files available to that user. Malicious repositories can also execute code through existing project scripts. The sensitive-path filter is a best-effort denylist of known credential shapes; a secret with an opaque name (for example a service-account key named after its project) can still be copied into the workspace. Use a disposable VM or container with restricted mounts and networking for untrusted repositories or high-value source code.

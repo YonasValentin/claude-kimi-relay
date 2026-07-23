@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { resolveInsideRoot } from "../src/fs-security.js";
+import { assertRegularFile, resolveInsideRoot } from "../src/fs-security.js";
 
 void test("resolveInsideRoot rejects lexical traversal", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "relay-root-"));
@@ -57,13 +57,22 @@ void test("resolveInsideRoot blocks token and state files that are not dotenv fi
     ".docker/config.json",
     "deploy/secrets.yaml",
     "infra/terraform.tfstate",
+    "deploy/tls.key",
+    "certs/server.pem",
+    "keystore.jks",
+    "app.p12",
+    "kubeconfig",
+    ".kube/config",
+    ".pgpass",
+    ".my.cnf",
+    "keys/id_ecdsa",
+    "gcp-service-account.json",
   ]) {
     await assert.rejects(() => resolveInsideRoot(root, path), /credential|secret/iu, path);
   }
-  assert.equal(
-    await resolveInsideRoot(root, "src/secretsmith.ts"),
-    join(root, "src/secretsmith.ts"),
-  );
+  for (const path of ["src/secretsmith.ts", "src/monkey.ts", "docs/keyboard.md", "account.json"]) {
+    assert.equal(await resolveInsideRoot(root, path), join(root, path), path);
+  }
 });
 
 void test("resolveInsideRoot accepts absolute paths when the root sits behind a symlink", async (t) => {
@@ -81,4 +90,16 @@ void test("resolveInsideRoot accepts absolute paths when the root sits behind a 
     await resolveInsideRoot(linkRoot, join(linkRoot, "file.txt")),
     join(root, "file.txt"),
   );
+});
+
+void test("assertRegularFile rejects directories and oversized files", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-file-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await mkdir(join(root, "adir"));
+  await assert.rejects(() => assertRegularFile(join(root, "adir"), 1_000_000), /regular file/iu);
+
+  await writeFile(join(root, "big.txt"), "x".repeat(50));
+  await assert.rejects(() => assertRegularFile(join(root, "big.txt"), 10), /safety limit/iu);
+  await assert.doesNotReject(() => assertRegularFile(join(root, "big.txt"), 1_000));
 });
