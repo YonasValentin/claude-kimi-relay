@@ -22,7 +22,8 @@
 - Delegate output is a binary Git patch relative to that baseline.
 - Publishing, pushes, commits, dependency installation, network utilities, privilege escalation, and common credential paths are denied by default.
 - Task JSON updates use atomic replacement and per-task cross-process locks.
-- Kimi inherits a small environment allowlist.
+- Kimi inherits a small environment allowlist, with credentials stripped from any forwarded proxy URL.
+- Copied symlinks are rewritten to workspace-relative targets, and the agent runs in its own process group so termination reaches any helper it spawned.
 
 ## Residual risks
 
