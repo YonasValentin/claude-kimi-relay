@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 import test from "node:test";
 
 import { runCommand } from "../src/process.js";
@@ -94,4 +103,38 @@ void test("isolated workspace excludes sensitive files and original Git history"
   });
   assert.doesNotMatch(objects.stdout, /old-secret\.txt|(?:^|\s)\.env(?:\s|$)/mu);
   assert.ok(prepared.warnings.some((warning) => warning.includes("excluded sensitive path .env")));
+});
+
+void test("an absolute in-repo symlink is rewritten to stay inside the workspace", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "relay-link-repo-")));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-link-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  await mkdir(join(root, "data"));
+  await writeFile(join(root, "data", "real.txt"), "hello\n");
+  // Absolute symlink pointing back into the original checkout.
+  await symlink(join(root, "data", "real.txt"), join(root, "link.txt"));
+  await runCommand("git", ["add", "-A"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "with symlink"], { cwd: root });
+
+  const manager = new WorkspaceManager(config(dataDir));
+  const prepared = await manager.prepare("task-link", root, "review", "HEAD");
+
+  const copied = join(prepared.path, "link.txt");
+  const linkValue = await readlink(copied);
+  assert.ok(!isAbsolute(linkValue), `link should be relative, got ${linkValue}`);
+  assert.ok(!linkValue.includes(root), "link must not reference the original project path");
+
+  // It must resolve to the copied file inside the workspace, not the original.
+  const resolved = await realpath(copied);
+  assert.ok(resolved.startsWith(`${await realpath(prepared.path)}${sep}`));
+  assert.equal(await readFile(copied, "utf8"), "hello\n");
 });

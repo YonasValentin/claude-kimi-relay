@@ -3,7 +3,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readlink,
   readdir,
   realpath,
   rm,
@@ -250,7 +249,16 @@ export class WorkspaceManager {
       const canonicalTarget = await realpath(source);
       if (!isContained(canonicalRoot, canonicalTarget)) return false;
       if (isSensitivePath(relative(canonicalRoot, canonicalTarget))) return false;
-      const linkTarget = await readlink(source);
+      // Recreate the link as a workspace-relative path to the canonical target
+      // instead of copying its raw value. A raw absolute link (or one whose
+      // relative value resolves differently at the new depth) would point back
+      // into the original project tree; a relative link stays inside the copy.
+      // Computed in root-relative space so the link and target keep the same
+      // layout in the destination (and so a symlinked temp root like /var on
+      // macOS does not turn into a spurious escaping path).
+      const relSource = relative(sourceRoot, source);
+      const relTarget = relative(canonicalRoot, canonicalTarget);
+      const linkTarget = relative(dirname(relSource), relTarget) || ".";
       await mkdir(dirname(target), { recursive: true });
       await symlink(linkTarget, target);
       return true;

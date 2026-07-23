@@ -92,7 +92,19 @@ async function runCommand(command, args, options = {}) {
     if (timeout !== void 0) clearTimeout(timeout);
   }
 }
+function stripProxyCredentials(value) {
+  try {
+    const url2 = new URL(value);
+    if (url2.username === "" && url2.password === "") return value;
+    url2.username = "";
+    url2.password = "";
+    return url2.toString();
+  } catch {
+    return value;
+  }
+}
 function sanitizedAgentEnvironment(env = process.env) {
+  const proxyKeys = /* @__PURE__ */ new Set(["HTTP_PROXY", "HTTPS_PROXY"]);
   const allowedPrefixes = ["KIMI_", "MOONSHOT_", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
   const allowedNames = /* @__PURE__ */ new Set([
     "PATH",
@@ -112,7 +124,10 @@ function sanitizedAgentEnvironment(env = process.env) {
     Object.entries(env).filter(([key, value]) => {
       if (value === void 0) return false;
       return allowedNames.has(key) || allowedPrefixes.some((prefix) => key.startsWith(prefix));
-    })
+    }).map(([key, value]) => [
+      key,
+      proxyKeys.has(key) ? stripProxyCredentials(value ?? "") : value
+    ])
   );
 }
 var init_process = __esm({
@@ -15209,12 +15224,26 @@ function extractProgress(update) {
   return void 0;
 }
 var TERMINATE_GRACE_MS = 2e3;
-async function terminate(child) {
+function signalChild(child, signal, group) {
+  if (group && process.platform !== "win32" && typeof child.pid === "number") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+  }
+}
+async function terminate(child, options = {}) {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  const group = options.group ?? false;
   const exited = once(child, "exit").then(() => true);
-  child.kill("SIGTERM");
+  signalChild(child, "SIGTERM", group);
   if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)])) return;
-  child.kill("SIGKILL");
+  signalChild(child, "SIGKILL", group);
   await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)]);
 }
 var KimiAcpClient = class {
@@ -15233,6 +15262,10 @@ var KimiAcpClient = class {
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       signal: controller.signal,
+      // Own process group (POSIX) so termination can signal Kimi and every
+      // helper it spawns, not just the direct child. Not unref'd — the relay
+      // still awaits the protocol and reaps the group in the finally below.
+      detached: process.platform !== "win32",
       windowsHide: true
     });
     const stderr = [];
@@ -15382,7 +15415,7 @@ ${diagnostic}` : ""}`,
     } finally {
       clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", onExternalAbort);
-      await terminate(child);
+      await terminate(child, { group: true });
     }
   }
 };
@@ -15560,7 +15593,6 @@ import {
   lstat,
   mkdir as mkdir4,
   mkdtemp,
-  readlink,
   readdir as readdir2,
   realpath as realpath2,
   rm as rm3,
@@ -15747,7 +15779,9 @@ var WorkspaceManager = class {
       const canonicalTarget = await realpath2(source);
       if (!isContained2(canonicalRoot, canonicalTarget)) return false;
       if (isSensitivePath(relative2(canonicalRoot, canonicalTarget))) return false;
-      const linkTarget = await readlink(source);
+      const relSource = relative2(sourceRoot, source);
+      const relTarget = relative2(canonicalRoot, canonicalTarget);
+      const linkTarget = relative2(dirname4(relSource), relTarget) || ".";
       await mkdir4(dirname4(target), { recursive: true });
       await symlink(linkTarget, target);
       return true;
