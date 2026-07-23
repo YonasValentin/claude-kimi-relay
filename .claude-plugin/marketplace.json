@@ -11,7 +11,7 @@
       "name": "kimi-relay",
       "source": "./plugin",
       "description": "Review, challenge, and delegate tasks to Kimi Code in an isolated workspace.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "category": "development",
       "tags": ["kimi", "code-review", "multi-agent", "acp"]
     }

@@ -31796,7 +31796,7 @@ var PermissionPolicy = class {
 };
 
 // src/version.ts
-var VERSION = "0.1.1";
+var VERSION = "0.1.2";
 
 // src/acp-client.ts
 function extractText(update) {

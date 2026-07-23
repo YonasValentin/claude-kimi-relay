@@ -1,6 +1,6 @@
 {
   "name": "claude-kimi-relay",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A secure Claude Code plugin and npm runtime for delegating review and implementation tasks to Kimi Code through ACP.",
   "type": "module",
   "license": "Apache-2.0",
