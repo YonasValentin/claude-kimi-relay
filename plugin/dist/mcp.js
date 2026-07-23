@@ -31795,6 +31795,9 @@ var PermissionPolicy = class {
   }
 };
 
+// src/version.ts
+var VERSION = "0.1.1";
+
 // src/acp-client.ts
 function extractText(update) {
   if (typeof update !== "object" || update === null) return void 0;
@@ -31932,7 +31935,7 @@ var KimiAcpClient = class {
                 writeTextFile: mode === "delegate"
               }
             },
-            clientInfo: { name: "claude-kimi-relay", version: "0.1.0" }
+            clientInfo: { name: "claude-kimi-relay", version: VERSION }
           });
         } catch (error40) {
           if (error40 instanceof RequestError && error40.code === -32e3) {
@@ -32739,7 +32742,7 @@ var TaskService = class {
 // src/mcp.ts
 var config2 = loadConfig();
 var tasks = new TaskService(config2);
-var server = new McpServer({ name: "claude-kimi-relay", version: "0.1.0" });
+var server = new McpServer({ name: "claude-kimi-relay", version: VERSION });
 function text(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }

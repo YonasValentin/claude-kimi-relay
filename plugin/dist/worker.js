@@ -15136,6 +15136,9 @@ function sanitizedAgentEnvironment(env = process.env) {
   );
 }
 
+// src/version.ts
+var VERSION = "0.1.1";
+
 // src/acp-client.ts
 function extractText(update) {
   if (typeof update !== "object" || update === null) return void 0;
@@ -15273,7 +15276,7 @@ var KimiAcpClient = class {
                 writeTextFile: mode === "delegate"
               }
             },
-            clientInfo: { name: "claude-kimi-relay", version: "0.1.0" }
+            clientInfo: { name: "claude-kimi-relay", version: VERSION }
           });
         } catch (error40) {
           if (error40 instanceof RequestError && error40.code === -32e3) {

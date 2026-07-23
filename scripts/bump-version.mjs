@@ -25,8 +25,16 @@ for (const [path, mutate] of targets) {
   await writeFile(path, `${JSON.stringify(json, null, 2)}\n`);
 }
 
+// The version the relay reports over ACP/MCP lives in a build-time constant.
+const versionSource = "src/version.ts";
+const source = await readFile(versionSource, "utf8");
+await writeFile(
+  versionSource,
+  source.replace(/export const VERSION = "[^"]*";/u, `export const VERSION = "${version}";`),
+);
+
 // Normalize to the repo's Prettier format so `npm run verify` stays green.
-execFileSync("npx", ["prettier", "--write", ...targets.map(([path]) => path)], {
+execFileSync("npx", ["prettier", "--write", versionSource, ...targets.map(([path]) => path)], {
   stdio: "inherit",
 });
 
@@ -34,7 +42,7 @@ execFileSync("npx", ["prettier", "--write", ...targets.map(([path]) => path)], {
 execFileSync("npm", ["run", "build:plugin"], { stdio: "inherit" });
 
 console.log(
-  `\nSet version ${version} in package.json + both plugin manifests and rebuilt plugin/dist.`,
+  `\nSet version ${version} in package.json, both plugin manifests, and src/version.ts, and rebuilt plugin/dist.`,
 );
 console.log("Next:");
 console.log("  npm run verify");
