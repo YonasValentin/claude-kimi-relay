@@ -1,8 +1,10 @@
 import * as acp from "@agentclientprotocol/sdk";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 
 import type {
   AgentRunRequest,
@@ -37,6 +39,20 @@ function extractProgress(update: unknown): string | undefined {
   }
   if (record.sessionUpdate === "plan") return "Kimi updated its plan.";
   return undefined;
+}
+
+const TERMINATE_GRACE_MS = 2000;
+
+// `kimi acp` does not exit on SIGTERM. A live child handle keeps the relay's
+// event loop alive, so without escalating to SIGKILL every finished task
+// leaves its worker and its Kimi process running forever.
+export async function terminate(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = once(child, "exit").then(() => true);
+  child.kill("SIGTERM");
+  if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)])) return;
+  child.kill("SIGKILL");
+  await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)]);
 }
 
 export class KimiAcpClient {
@@ -223,7 +239,7 @@ export class KimiAcpClient {
     } finally {
       clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", onExternalAbort);
-      if (!child.killed) child.kill("SIGTERM");
+      await terminate(child);
     }
   }
 }

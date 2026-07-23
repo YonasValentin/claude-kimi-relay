@@ -4,6 +4,10 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+### Fixed
+
+- Relay processes no longer hang after a task finishes. `kimi acp` ignores `SIGTERM`, and the surviving child kept the event loop alive, so every completed task leaked its foreground CLI or detached worker along with its Kimi process. Termination now escalates to `SIGKILL` after a grace period.
+
 ## [0.1.0] - 2026-07-23
 
 ### Added

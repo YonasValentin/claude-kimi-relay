@@ -5,7 +5,7 @@ Last validated on 2026-07-23 on macOS (arm64) with Node.js 22.16, npm 10.9, Git 
 ## Passed on the release machine
 
 - `npm install` with a committed `package-lock.json`; `npm audit` reports **0 vulnerabilities** (an npm `override` pins `@hono/node-server` to `^2.0.11` because the relay only uses MCP stdio transport, and SDK 1.29's `^1.19.9` range is flagged by GHSA-frvp-7c67-39w9; the 2.x exports used by the SDK, `serve` and `getRequestListener`, are unchanged).
-- `npm run verify` — Prettier, ESLint (`strictTypeChecked` + `eslint-plugin-security`, zero warnings), strict `tsc --noEmit`, **14 Node test cases passed with 0 failures**, and a clean `tsc` + esbuild plugin bundle build.
+- `npm run verify` — Prettier, ESLint (`strictTypeChecked` + `eslint-plugin-security`, zero warnings), strict `tsc --noEmit`, **16 Node test cases passed with 0 failures**, and a clean `tsc` + esbuild plugin bundle build.
 - Permission-policy tests for review writes, publication, network tools, dependency installation, and commits.
 - Filesystem tests for lexical traversal, symlink escape, secret paths, safe nested writes, and absolute paths through a symlinked workspace root (for example `/tmp` on macOS).
 - Persistence tests for atomic writes and concurrent updates.

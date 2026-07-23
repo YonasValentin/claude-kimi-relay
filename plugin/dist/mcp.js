@@ -31628,9 +31628,11 @@ var legacyClientNotificationMethods = /* @__PURE__ */ new Set([
 
 // src/acp-client.ts
 import { spawn as spawn2 } from "node:child_process";
+import { once } from "node:events";
 import { mkdir as mkdir2, readFile, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname2 } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 
 // src/fs-security.ts
 import { realpath, stat } from "node:fs/promises";
@@ -31777,6 +31779,15 @@ function extractProgress(update) {
   }
   if (record2.sessionUpdate === "plan") return "Kimi updated its plan.";
   return void 0;
+}
+var TERMINATE_GRACE_MS = 2e3;
+async function terminate(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = once(child, "exit").then(() => true);
+  child.kill("SIGTERM");
+  if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)])) return;
+  child.kill("SIGKILL");
+  await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)]);
 }
 var KimiAcpClient = class {
   constructor(config3) {
@@ -31943,7 +31954,7 @@ ${diagnostic}` : ""}`,
     } finally {
       clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", onExternalAbort);
-      if (!child.killed) child.kill("SIGTERM");
+      await terminate(child);
     }
   }
 };
