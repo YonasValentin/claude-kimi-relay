@@ -87,6 +87,7 @@ async function runCommand(command, args, options = {}) {
     if (controller.signal.aborted) {
       throw new RelayError(`${command} timed out.`, "COMMAND_TIMEOUT", { cause: error40 });
     }
+    if (error40 instanceof RelayError) throw error40;
     throw new RelayError(toErrorMessage(error40), "COMMAND_ERROR", { cause: error40 });
   } finally {
     if (timeout !== void 0) clearTimeout(timeout);
@@ -148,8 +149,10 @@ var DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 var DEFAULT_MAX_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024;
 var DEFAULT_MAX_RESULT_BYTES = 10 * 1024 * 1024;
 function positiveInteger(value, fallback) {
-  if (value === void 0 || value.trim() === "") return fallback;
-  const parsed = Number.parseInt(value, 10);
+  if (value === void 0) return fallback;
+  const trimmed = value.trim();
+  if (!/^\d+$/u.test(trimmed)) return fallback;
+  const parsed = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 function loadConfig(env = process.env) {
@@ -15368,7 +15371,7 @@ var KimiAcpClient = class {
         }
         if (initializeResponse.protocolVersion !== PROTOCOL_VERSION) {
           throw new RelayError(
-            `Kimi Code speaks ACP protocol version ${initializeResponse.protocolVersion}, but this relay supports version ${PROTOCOL_VERSION}.`,
+            `Kimi Code negotiated ACP protocol version ${initializeResponse.protocolVersion}, which this relay (built for version ${PROTOCOL_VERSION}) does not support. Align the Kimi Code and claude-kimi-relay versions.`,
             "ACP_VERSION_MISMATCH"
           );
         }
@@ -15484,7 +15487,7 @@ var TaskStore = class {
     return join3(this.dataDir, "tasks");
   }
   taskPath(id) {
-    if (!/^[a-f0-9-]{36}$/u.test(id)) {
+    if (!/^[a-f0-9-]{36}$/iu.test(id)) {
       throw new RelayError("Invalid task ID.", "INVALID_TASK_ID");
     }
     return join3(this.tasksDir, `${id}.json`);
@@ -15662,10 +15665,6 @@ function assertSafeProjectPath(path) {
   }
   return absolute;
 }
-function isContained2(root, candidate) {
-  const rel = relative2(root, candidate);
-  return rel === "" || !rel.startsWith(`..${sep2}`) && rel !== ".." && !isAbsolute2(rel);
-}
 function assertSafeRelativePath(path) {
   if (path === "" || isAbsolute2(path) || path === ".." || path.startsWith(`..${sep2}`)) {
     throw new RelayError(`Git returned an unsafe path: ${path}`, "UNSAFE_GIT_PATH");
@@ -15815,7 +15814,7 @@ var WorkspaceManager = class {
     try {
       const canonicalRoot = await realpath2(sourceRoot);
       const canonicalTarget = await realpath2(source);
-      if (!isContained2(canonicalRoot, canonicalTarget)) return false;
+      if (!isContained(canonicalRoot, canonicalTarget)) return false;
       if (isSensitivePath(relative2(canonicalRoot, canonicalTarget))) return false;
       const relSource = relative2(sourceRoot, source);
       const relTarget = relative2(canonicalRoot, canonicalTarget);
@@ -16066,6 +16065,10 @@ var TaskService = class {
   }
   store;
   runner;
+  // Foreground runs execute in this process rather than a detached worker, so
+  // there is no pid to signal. Track their abort controllers so cancel() can
+  // actually stop the in-flight Kimi run instead of only flipping the record.
+  foreground = /* @__PURE__ */ new Map();
   async start(request) {
     const input = validateRequest(request, this.config);
     const id = randomUUID2();
@@ -16085,7 +16088,15 @@ var TaskService = class {
       events: [{ at, status: "queued", message: "Task queued." }]
     };
     await this.store.create(record2);
-    if (!input.background) return this.runner.run(id);
+    if (!input.background) {
+      const controller = new AbortController();
+      this.foreground.set(id, controller);
+      try {
+        return await this.runner.run(id, controller.signal);
+      } finally {
+        this.foreground.delete(id);
+      }
+    }
     const currentFile = fileURLToPath(import.meta.url);
     const workerPath = join5(dirname5(currentFile), "worker.js");
     const child = spawn3(process.execPath, [workerPath, "--task", id], {
@@ -16132,6 +16143,7 @@ var TaskService = class {
   async cancel(id) {
     const record2 = await this.store.get(id);
     if (["completed", "failed", "cancelled", "timed_out"].includes(record2.status)) return record2;
+    this.foreground.get(id)?.abort();
     if (record2.pid !== void 0) {
       try {
         process.kill(record2.pid, "SIGTERM");

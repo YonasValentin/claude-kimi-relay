@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 
 import { loadConfig } from "./config.js";
@@ -38,6 +39,11 @@ function resolveProjectDir(input: string | undefined): string {
       "No project directory was supplied. Restart Claude Code so CLAUDE_PROJECT_DIR is passed to the plugin MCP server.",
       "PROJECT_DIR_UNAVAILABLE",
     );
+  }
+  // The schema documents an absolute path; a relative one would otherwise be
+  // resolved against the MCP server's cwd, which is not the user's project.
+  if (!isAbsolute(projectDir)) {
+    throw new RelayError("projectDir must be an absolute path.", "INVALID_PROJECT_DIR");
   }
   return projectDir;
 }

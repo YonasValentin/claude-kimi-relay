@@ -7,6 +7,12 @@ import test from "node:test";
 import { TaskStore } from "../src/store.js";
 import type { TaskRecord } from "../src/types.js";
 
+void test("taskPath accepts uppercase UUIDs, matching the MCP uuid validator", () => {
+  const store = new TaskStore("/tmp/relay-id-check");
+  assert.doesNotThrow(() => store.taskPath("A1B2C3D4-1111-4111-8111-111111111111"));
+  assert.throws(() => store.taskPath("not/a/uuid"), /Invalid task ID/u);
+});
+
 void test("TaskStore persists and atomically updates tasks", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "relay-store-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

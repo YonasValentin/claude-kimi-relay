@@ -20,7 +20,9 @@ export class TaskStore {
   }
 
   public taskPath(id: string): string {
-    if (!/^[a-f0-9-]{36}$/u.test(id)) {
+    // Case-insensitive to match the MCP layer's zod .uuid(), which accepts
+    // uppercase-hex UUIDs; the store rejected them, an unnecessary asymmetry.
+    if (!/^[a-f0-9-]{36}$/iu.test(id)) {
       throw new RelayError("Invalid task ID.", "INVALID_TASK_ID");
     }
     return join(this.tasksDir, `${id}.json`);

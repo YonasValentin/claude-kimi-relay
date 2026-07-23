@@ -28,7 +28,7 @@ const SENSITIVE_PATH_PATTERNS = [
   /(?:^|[/\\])[^/\\]*service[_-]?account[^/\\]*\.json$/iu,
 ];
 
-function isContained(root: string, candidate: string): boolean {
+export function isContained(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
