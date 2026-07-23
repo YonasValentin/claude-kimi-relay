@@ -38,3 +38,45 @@ void test("terminate returns without error when the agent already exited", async
 
   assert.notEqual(child.exitCode, null);
 });
+
+void test(
+  "terminate with group:true reaps a detached child's descendants",
+  { skip: process.platform === "win32" },
+  async () => {
+    // A group leader that ignores SIGTERM and spawns a grandchild that also
+    // ignores SIGTERM. A plain child.kill leaves the grandchild orphaned; a
+    // group signal must escalate to SIGKILL and reap both.
+    const parentSource = [
+      'const { spawn } = require("node:child_process");',
+      "process.on('SIGTERM', () => {});",
+      "const g = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"], { stdio: 'ignore' });",
+      "process.stdout.write(String(g.pid));",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+
+    const parent = spawn(process.execPath, ["-e", parentSource], {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const parentPid = parent.pid;
+    assert.ok(parentPid !== undefined);
+
+    const grandchildPid = await new Promise<number>((resolve) => {
+      parent.stdout.once("data", (chunk: Buffer) => resolve(Number.parseInt(chunk.toString(), 10)));
+    });
+    assert.ok(Number.isInteger(grandchildPid));
+
+    await terminate(parent, { group: true });
+
+    assert.equal(isAlive(parentPid), false, "parent survived");
+    await waitForDead(grandchildPid);
+    assert.equal(isAlive(grandchildPid), false, "grandchild survived group terminate");
+  },
+);
+
+async function waitForDead(pid: number): Promise<void> {
+  const deadline = Date.now() + 3000;
+  while (isAlive(pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}

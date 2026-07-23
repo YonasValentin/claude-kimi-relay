@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { RelayConfig, TaskKind, TaskRecord, TaskRequest } from "./types.js";
-import { RelayError } from "./errors.js";
+import { RelayError, toErrorMessage } from "./errors.js";
 import { TaskRunner } from "./runner.js";
 import { TaskStore } from "./store.js";
 
@@ -55,6 +55,10 @@ function validateRequest(request: TaskRequest, config: RelayConfig): ValidatedTa
 export class TaskService {
   private readonly store: TaskStore;
   private readonly runner: TaskRunner;
+  // Foreground runs execute in this process rather than a detached worker, so
+  // there is no pid to signal. Track their abort controllers so cancel() can
+  // actually stop the in-flight Kimi run instead of only flipping the record.
+  private readonly foreground = new Map<string, AbortController>();
 
   public constructor(private readonly config: RelayConfig) {
     this.store = new TaskStore(config.dataDir);
@@ -81,7 +85,15 @@ export class TaskService {
     };
     await this.store.create(record);
 
-    if (!input.background) return this.runner.run(id);
+    if (!input.background) {
+      const controller = new AbortController();
+      this.foreground.set(id, controller);
+      try {
+        return await this.runner.run(id, controller.signal);
+      } finally {
+        this.foreground.delete(id);
+      }
+    }
 
     const currentFile = fileURLToPath(import.meta.url);
     const workerPath = join(dirname(currentFile), "worker.js");
@@ -92,6 +104,16 @@ export class TaskService {
       shell: false,
       stdio: "ignore",
       windowsHide: true,
+    });
+    // A detached worker that fails to spawn (EMFILE / ENOMEM under memory
+    // pressure, a missing cwd) emits 'error' asynchronously, after start() has
+    // already returned. With no listener that becomes an uncaught exception and
+    // takes down the long-lived MCP server, stranding every task. Record the
+    // failure on the task instead of crashing the process.
+    child.once("error", (error) => {
+      void this.markFailed(id, `Could not start background worker: ${toErrorMessage(error)}`).catch(
+        () => undefined,
+      );
     });
     child.unref();
     return this.store.update(id, (current) => ({
@@ -109,9 +131,27 @@ export class TaskService {
     return this.store.list(limit);
   }
 
+  private markFailed(id: string, message: string): Promise<TaskRecord> {
+    return this.store.update(id, (current) => {
+      if (["completed", "failed", "cancelled", "timed_out"].includes(current.status)) {
+        return current;
+      }
+      const at = now();
+      return {
+        ...current,
+        status: "failed",
+        updatedAt: at,
+        error: message,
+        events: [...current.events, { at, status: "failed", message }],
+      };
+    });
+  }
+
   public async cancel(id: string): Promise<TaskRecord> {
     const record = await this.store.get(id);
     if (["completed", "failed", "cancelled", "timed_out"].includes(record.status)) return record;
+    // Foreground run in this process: abort its Kimi session directly.
+    this.foreground.get(id)?.abort();
     if (record.pid !== undefined) {
       try {
         process.kill(record.pid, "SIGTERM");

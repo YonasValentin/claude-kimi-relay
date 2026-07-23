@@ -27744,6 +27744,9 @@ var StdioServerTransport = class {
   }
 };
 
+// src/mcp.ts
+import { isAbsolute as isAbsolute3 } from "node:path";
+
 // src/config.ts
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -27752,8 +27755,10 @@ var DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 var DEFAULT_MAX_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024;
 var DEFAULT_MAX_RESULT_BYTES = 10 * 1024 * 1024;
 function positiveInteger(value, fallback) {
-  if (value === void 0 || value.trim() === "") return fallback;
-  const parsed = Number.parseInt(value, 10);
+  if (value === void 0) return fallback;
+  const trimmed = value.trim();
+  if (!/^\d+$/u.test(trimmed)) return fallback;
+  const parsed = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 function loadConfig(env = process.env) {
@@ -27852,12 +27857,25 @@ async function runCommand(command, args, options = {}) {
     if (controller.signal.aborted) {
       throw new RelayError(`${command} timed out.`, "COMMAND_TIMEOUT", { cause: error40 });
     }
+    if (error40 instanceof RelayError) throw error40;
     throw new RelayError(toErrorMessage(error40), "COMMAND_ERROR", { cause: error40 });
   } finally {
     if (timeout !== void 0) clearTimeout(timeout);
   }
 }
+function stripProxyCredentials(value) {
+  try {
+    const url2 = new URL(value);
+    if (url2.username === "" && url2.password === "") return value;
+    url2.username = "";
+    url2.password = "";
+    return url2.toString();
+  } catch {
+    return value;
+  }
+}
 function sanitizedAgentEnvironment(env = process.env) {
+  const proxyKeys = /* @__PURE__ */ new Set(["HTTP_PROXY", "HTTPS_PROXY"]);
   const allowedPrefixes = ["KIMI_", "MOONSHOT_", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
   const allowedNames = /* @__PURE__ */ new Set([
     "PATH",
@@ -27877,7 +27895,10 @@ function sanitizedAgentEnvironment(env = process.env) {
     Object.entries(env).filter(([key, value]) => {
       if (value === void 0) return false;
       return allowedNames.has(key) || allowedPrefixes.some((prefix) => key.startsWith(prefix));
-    })
+    }).map(([key, value]) => [
+      key,
+      proxyKeys.has(key) ? stripProxyCredentials(value ?? "") : value
+    ])
   );
 }
 
@@ -27926,7 +27947,7 @@ async function runDoctor(config3) {
 
 // src/task-service.ts
 import { spawn as spawn3 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { dirname as dirname5, join as join5, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31642,12 +31663,20 @@ var SENSITIVE_PATH_PATTERNS = [
   /(?:^|[/\\])\.ssh(?:[/\\]|$)/iu,
   /(?:^|[/\\])\.aws(?:[/\\]|$)/iu,
   /(?:^|[/\\])\.gnupg(?:[/\\]|$)/iu,
-  /(?:^|[/\\])id_(?:rsa|ed25519)(?:\.|$)/iu,
+  /(?:^|[/\\])id_(?:rsa|dsa|ecdsa|ed25519)(?:\.|$)/iu,
   /(?:^|[/\\])(?:credentials?|private[_-]?key|secret[_-]?key)(?:\.|$)/iu,
   /(?:^|[/\\])\.(?:envrc|npmrc|netrc|pypirc|git-credentials)$/iu,
   /(?:^|[/\\])\.docker[/\\]config\.json$/iu,
   /(?:^|[/\\])secrets?\.(?:ya?ml|json|toml)$/iu,
-  /\.tfstate(?:\.backup)?$/iu
+  /\.tfstate(?:\.backup)?$/iu,
+  // Key material and keystores by extension.
+  /\.(?:pem|key|p12|pfx|jks|keystore)$/iu,
+  // Cluster, database, and service-account credential files.
+  /(?:^|[/\\])kubeconfig$/iu,
+  /(?:^|[/\\])\.kube[/\\]config$/iu,
+  /(?:^|[/\\])\.pgpass$/iu,
+  /(?:^|[/\\])\.my\.cnf$/iu,
+  /(?:^|[/\\])[^/\\]*service[_-]?account[^/\\]*\.json$/iu
 ];
 function isContained(root, candidate) {
   const rel = relative(root, candidate);
@@ -31731,11 +31760,13 @@ var SAFE_REVIEW_HINTS = [
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu
 ];
+var MAX_INSPECTABLE_BYTES = 1e5;
 function serializeRequest(request) {
   try {
-    return JSON.stringify(request.toolCall ?? {}).slice(0, 1e5);
+    const serialized = JSON.stringify(request.toolCall ?? {});
+    return serialized.length > MAX_INSPECTABLE_BYTES ? void 0 : serialized;
   } catch {
-    return request.toolCall?.title ?? "";
+    return void 0;
   }
 }
 function optionMatching(options, pattern) {
@@ -31744,6 +31775,9 @@ function optionMatching(options, pattern) {
 var PermissionPolicy = class {
   decide(request, context) {
     const description = serializeRequest(request);
+    if (description === void 0) {
+      return this.cancelOrDeny(request.options);
+    }
     if (DENY_ALWAYS.some((pattern) => pattern.test(description))) {
       return this.cancelOrDeny(request.options);
     }
@@ -31781,12 +31815,26 @@ function extractProgress(update) {
   return void 0;
 }
 var TERMINATE_GRACE_MS = 2e3;
-async function terminate(child) {
+function signalChild(child, signal, group) {
+  if (group && process.platform !== "win32" && typeof child.pid === "number") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+  }
+}
+async function terminate(child, options = {}) {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  const group = options.group ?? false;
   const exited = once(child, "exit").then(() => true);
-  child.kill("SIGTERM");
+  signalChild(child, "SIGTERM", group);
   if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)])) return;
-  child.kill("SIGKILL");
+  signalChild(child, "SIGKILL", group);
   await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)]);
 }
 var KimiAcpClient = class {
@@ -31805,6 +31853,10 @@ var KimiAcpClient = class {
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       signal: controller.signal,
+      // Own process group (POSIX) so termination can signal Kimi and every
+      // helper it spawns, not just the direct child. Not unref'd — the relay
+      // still awaits the protocol and reaps the group in the finally below.
+      detached: process.platform !== "win32",
       windowsHide: true
     });
     const stderr = [];
@@ -31894,7 +31946,7 @@ var KimiAcpClient = class {
         }
         if (initializeResponse.protocolVersion !== PROTOCOL_VERSION) {
           throw new RelayError(
-            `Kimi Code speaks ACP protocol version ${initializeResponse.protocolVersion}, but this relay supports version ${PROTOCOL_VERSION}.`,
+            `Kimi Code negotiated ACP protocol version ${initializeResponse.protocolVersion}, which this relay (built for version ${PROTOCOL_VERSION}) does not support. Align the Kimi Code and claude-kimi-relay versions.`,
             "ACP_VERSION_MISMATCH"
           );
         }
@@ -31954,7 +32006,7 @@ ${diagnostic}` : ""}`,
     } finally {
       clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", onExternalAbort);
-      await terminate(child);
+      await terminate(child, { group: true });
     }
   }
 };
@@ -31990,6 +32042,7 @@ ${userPrompt}`;
 }
 
 // src/store.ts
+import { randomUUID } from "node:crypto";
 import { open, mkdir as mkdir3, readFile as readFile2, readdir, rename, rm as rm2, stat as stat2, writeFile as writeFile3 } from "node:fs/promises";
 import { dirname as dirname3, join as join3 } from "node:path";
 var LOCK_TIMEOUT_MS = 1e4;
@@ -32005,7 +32058,7 @@ var TaskStore = class {
     return join3(this.dataDir, "tasks");
   }
   taskPath(id) {
-    if (!/^[a-f0-9-]{36}$/u.test(id)) {
+    if (!/^[a-f0-9-]{36}$/iu.test(id)) {
       throw new RelayError("Invalid task ID.", "INVALID_TASK_ID");
     }
     return join3(this.tasksDir, `${id}.json`);
@@ -32021,26 +32074,22 @@ var TaskStore = class {
   async withLock(id, operation) {
     await this.initialize();
     const path = this.lockPath(id);
+    const token = `${process.pid}:${randomUUID()}`;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     for (; ; ) {
       try {
         const handle = await open(path, "wx", 384);
-        await handle.writeFile(`${process.pid}
-`, "utf8");
+        await handle.writeFile(token, "utf8");
+        await handle.close().catch(() => void 0);
         try {
           return await operation();
         } finally {
-          await handle.close().catch(() => void 0);
-          await rm2(path, { force: true }).catch(() => void 0);
+          await this.releaseLock(path, token);
         }
       } catch (error40) {
         const code = error40.code;
         if (code !== "EEXIST") throw error40;
-        const info = await stat2(path).catch(() => void 0);
-        if (info !== void 0 && Date.now() - info.mtimeMs > STALE_LOCK_MS) {
-          await rm2(path, { force: true }).catch(() => void 0);
-          continue;
-        }
+        if (await this.reclaimIfDead(path)) continue;
         if (Date.now() >= deadline) {
           throw new RelayError(`Timed out waiting for task ${id} lock.`, "TASK_LOCK_TIMEOUT", {
             cause: error40
@@ -32048,6 +32097,34 @@ var TaskStore = class {
         }
         await sleep(20 + Math.floor(Math.random() * 30));
       }
+    }
+  }
+  // Compare-and-delete: only remove the lock if it still carries our token. If
+  // an over-long stall let another holder steal it, we must not delete theirs.
+  async releaseLock(path, token) {
+    const current = await readFile2(path, "utf8").catch(() => void 0);
+    if (current === token) await rm2(path, { force: true }).catch(() => void 0);
+  }
+  // A stale lock is only reclaimed when its recorded holder is actually gone.
+  // A live-but-slow holder keeps its lock, so a waiter fails loudly with a lock
+  // timeout instead of stealing the lock and clobbering an in-flight update.
+  async reclaimIfDead(path) {
+    const info = await stat2(path).catch(() => void 0);
+    if (info === void 0) return true;
+    if (Date.now() - info.mtimeMs <= STALE_LOCK_MS) return false;
+    if (await this.holderAlive(path)) return false;
+    await rm2(path, { force: true }).catch(() => void 0);
+    return true;
+  }
+  async holderAlive(path) {
+    const raw = await readFile2(path, "utf8").catch(() => "");
+    const pid = Number.parseInt(raw.split(":")[0] ?? "", 10);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error40) {
+      return error40.code === "EPERM";
     }
   }
   async writeUnlocked(record2) {
@@ -32127,7 +32204,6 @@ import {
   lstat,
   mkdir as mkdir4,
   mkdtemp,
-  readlink,
   readdir as readdir2,
   realpath as realpath2,
   rm as rm3,
@@ -32157,10 +32233,6 @@ function assertSafeProjectPath(path) {
     );
   }
   return absolute;
-}
-function isContained2(root, candidate) {
-  const rel = relative2(root, candidate);
-  return rel === "" || !rel.startsWith(`..${sep2}`) && rel !== ".." && !isAbsolute2(rel);
 }
 function assertSafeRelativePath(path) {
   if (path === "" || isAbsolute2(path) || path === ".." || path.startsWith(`..${sep2}`)) {
@@ -32311,9 +32383,11 @@ var WorkspaceManager = class {
     try {
       const canonicalRoot = await realpath2(sourceRoot);
       const canonicalTarget = await realpath2(source);
-      if (!isContained2(canonicalRoot, canonicalTarget)) return false;
+      if (!isContained(canonicalRoot, canonicalTarget)) return false;
       if (isSensitivePath(relative2(canonicalRoot, canonicalTarget))) return false;
-      const linkTarget = await readlink(source);
+      const relSource = relative2(sourceRoot, source);
+      const relTarget = relative2(canonicalRoot, canonicalTarget);
+      const linkTarget = relative2(dirname4(relSource), relTarget) || ".";
       await mkdir4(dirname4(target), { recursive: true });
       await symlink(linkTarget, target);
       return true;
@@ -32560,9 +32634,13 @@ var TaskService = class {
   }
   store;
   runner;
+  // Foreground runs execute in this process rather than a detached worker, so
+  // there is no pid to signal. Track their abort controllers so cancel() can
+  // actually stop the in-flight Kimi run instead of only flipping the record.
+  foreground = /* @__PURE__ */ new Map();
   async start(request) {
     const input = validateRequest(request, this.config);
-    const id = randomUUID();
+    const id = randomUUID2();
     const at = now2();
     const record2 = {
       id,
@@ -32579,7 +32657,15 @@ var TaskService = class {
       events: [{ at, status: "queued", message: "Task queued." }]
     };
     await this.store.create(record2);
-    if (!input.background) return this.runner.run(id);
+    if (!input.background) {
+      const controller = new AbortController();
+      this.foreground.set(id, controller);
+      try {
+        return await this.runner.run(id, controller.signal);
+      } finally {
+        this.foreground.delete(id);
+      }
+    }
     const currentFile = fileURLToPath(import.meta.url);
     const workerPath = join5(dirname5(currentFile), "worker.js");
     const child = spawn3(process.execPath, [workerPath, "--task", id], {
@@ -32589,6 +32675,11 @@ var TaskService = class {
       shell: false,
       stdio: "ignore",
       windowsHide: true
+    });
+    child.once("error", (error40) => {
+      void this.markFailed(id, `Could not start background worker: ${toErrorMessage(error40)}`).catch(
+        () => void 0
+      );
     });
     child.unref();
     return this.store.update(id, (current) => ({
@@ -32603,9 +32694,25 @@ var TaskService = class {
   list(limit) {
     return this.store.list(limit);
   }
+  markFailed(id, message) {
+    return this.store.update(id, (current) => {
+      if (["completed", "failed", "cancelled", "timed_out"].includes(current.status)) {
+        return current;
+      }
+      const at = now2();
+      return {
+        ...current,
+        status: "failed",
+        updatedAt: at,
+        error: message,
+        events: [...current.events, { at, status: "failed", message }]
+      };
+    });
+  }
   async cancel(id) {
     const record2 = await this.store.get(id);
     if (["completed", "failed", "cancelled", "timed_out"].includes(record2.status)) return record2;
+    this.foreground.get(id)?.abort();
     if (record2.pid !== void 0) {
       try {
         process.kill(record2.pid, "SIGTERM");
@@ -32656,6 +32763,9 @@ function resolveProjectDir(input) {
       "No project directory was supplied. Restart Claude Code so CLAUDE_PROJECT_DIR is passed to the plugin MCP server.",
       "PROJECT_DIR_UNAVAILABLE"
     );
+  }
+  if (!isAbsolute3(projectDir)) {
+    throw new RelayError("projectDir must be an absolute path.", "INVALID_PROJECT_DIR");
   }
   return projectDir;
 }

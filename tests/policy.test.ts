@@ -72,3 +72,25 @@ void test("DENY_ALWAYS blocks destructive and credential commands in both modes"
     }
   }
 });
+
+void test("delegate denies an oversized tool call that pads a denied command past the inspection limit", () => {
+  // A truncating deny check let a denied command hide behind >100KB of padding
+  // so DENY_ALWAYS never saw it. Delegate mode must fail closed on a request it
+  // cannot fully inspect rather than fall through to the allow option.
+  const result = policy.decide(
+    {
+      toolCall: { title: "A".repeat(120_000), rawInput: { command: "git push origin main" } },
+      options,
+    },
+    { mode: "delegate", workspaceDir: "/tmp/workspace" },
+  );
+  assert.deepEqual(result, { outcome: "selected", optionId: "deny" });
+});
+
+void test("delegate still allows a normal in-workspace edit", () => {
+  const result = policy.decide(
+    { toolCall: { title: "Edit src/app.ts" }, options },
+    { mode: "delegate", workspaceDir: "/tmp/workspace" },
+  );
+  assert.deepEqual(result, { outcome: "selected", optionId: "allow" });
+});
