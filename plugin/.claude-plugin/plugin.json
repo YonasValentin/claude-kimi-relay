@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "kimi-relay",
+  "displayName": "Kimi Relay",
+  "version": "0.1.0",
+  "description": "Delegate secure reviews, adversarial challenges, and isolated implementation tasks from Claude Code to Kimi Code.",
+  "author": {
+    "name": "YonasValentin"
+  },
+  "homepage": "https://github.com/YonasValentin/claude-kimi-relay",
+  "repository": "https://github.com/YonasValentin/claude-kimi-relay",
+  "license": "Apache-2.0",
+  "keywords": ["kimi", "acp", "review", "delegation", "multi-agent"]
+}

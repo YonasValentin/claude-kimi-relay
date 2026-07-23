@@ -1,0 +1,6 @@
+src/
+tests/
+plugin/
+scripts/
+.github/
+coverage/

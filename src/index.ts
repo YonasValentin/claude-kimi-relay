@@ -1,0 +1,10 @@
+export { KimiAcpClient } from "./acp-client.js";
+export { loadConfig } from "./config.js";
+export { runDoctor } from "./doctor.js";
+export { RelayError } from "./errors.js";
+export { PermissionPolicy } from "./policy.js";
+export { TaskRunner } from "./runner.js";
+export { TaskService } from "./task-service.js";
+export { TaskStore } from "./store.js";
+export { WorkspaceManager } from "./workspace.js";
+export type * from "./types.js";

@@ -1,0 +1,6 @@
+dist
+plugin/dist
+node_modules
+coverage
+.remember
+*.patch

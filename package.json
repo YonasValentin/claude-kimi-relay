@@ -1,0 +1,88 @@
+{
+  "name": "claude-kimi-relay",
+  "version": "0.1.0",
+  "description": "A secure Claude Code plugin and npm runtime for delegating review and implementation tasks to Kimi Code through ACP.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": false,
+  "engines": {
+    "node": ">=22.14"
+  },
+  "bin": {
+    "claude-kimi-relay": "dist/cli.js",
+    "claude-kimi-relay-mcp": "dist/mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SECURITY.md",
+    "THREAT_MODEL.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "VALIDATION.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "tsc -p tsconfig.build.json",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "build:all": "npm run clean && npm run build && npm run build:plugin",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test:coverage": "c8 --all --include=src --exclude=src/mcp.ts --exclude=src/cli.ts node --import tsx --test tests/**/*.test.ts",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "doctor": "node dist/cli.js doctor",
+    "prepack": "npm run build",
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build:all",
+    "release:check": "node scripts/check-release.mjs"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.3.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.11"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.32.0",
+    "@types/node": "^22.15.30",
+    "c8": "^10.1.3",
+    "esbuild": "^0.25.8",
+    "eslint": "^9.32.0",
+    "eslint-plugin-security": "^3.0.1",
+    "globals": "17.7.0",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.38.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YonasValentin/claude-kimi-relay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YonasValentin/claude-kimi-relay/issues"
+  },
+  "homepage": "https://github.com/YonasValentin/claude-kimi-relay#readme",
+  "keywords": [
+    "claude-code",
+    "kimi-code",
+    "acp",
+    "mcp",
+    "ai-agents",
+    "code-review"
+  ]
+}

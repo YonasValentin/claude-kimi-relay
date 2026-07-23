@@ -1,0 +1,19 @@
+{
+  "name": "claude-kimi-relay",
+  "owner": {
+    "name": "YonasValentin"
+  },
+  "metadata": {
+    "description": "Secure Kimi Code delegation for Claude Code through ACP."
+  },
+  "plugins": [
+    {
+      "name": "kimi-relay",
+      "source": "./plugin",
+      "description": "Review, challenge, and delegate tasks to Kimi Code in an isolated workspace.",
+      "version": "0.1.0",
+      "category": "development",
+      "tags": ["kimi", "code-review", "multi-agent", "acp"]
+    }
+  ]
+}

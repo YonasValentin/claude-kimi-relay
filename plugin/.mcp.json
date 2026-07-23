@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "relay": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/mcp.js"],
+      "env": {
+        "CLAUDE_KIMI_RELAY_DATA_DIR": "${CLAUDE_PLUGIN_DATA}",
+        "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"
+      }
+    }
+  }
+}
