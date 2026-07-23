@@ -15,7 +15,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { RelayConfig, TaskKind } from "./types.js";
 import { RelayError } from "./errors.js";
-import { isSensitivePath } from "./fs-security.js";
+import { isContained, isSensitivePath } from "./fs-security.js";
 import { runCommand } from "./process.js";
 
 const COPY_EXCLUDES = new Set([
@@ -49,11 +49,6 @@ function assertSafeProjectPath(path: string): string {
     );
   }
   return absolute;
-}
-
-function isContained(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
 function assertSafeRelativePath(path: string): void {

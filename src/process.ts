@@ -81,6 +81,9 @@ export async function runCommand(
     if (controller.signal.aborted) {
       throw new RelayError(`${command} timed out.`, "COMMAND_TIMEOUT", { cause: error });
     }
+    // Preserve typed failures (OUTPUT_LIMIT, COMMAND_FAILED) so callers can
+    // branch on them; only wrap genuinely unknown errors as COMMAND_ERROR.
+    if (error instanceof RelayError) throw error;
     throw new RelayError(toErrorMessage(error), "COMMAND_ERROR", { cause: error });
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);

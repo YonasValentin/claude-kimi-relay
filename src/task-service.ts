@@ -55,6 +55,10 @@ function validateRequest(request: TaskRequest, config: RelayConfig): ValidatedTa
 export class TaskService {
   private readonly store: TaskStore;
   private readonly runner: TaskRunner;
+  // Foreground runs execute in this process rather than a detached worker, so
+  // there is no pid to signal. Track their abort controllers so cancel() can
+  // actually stop the in-flight Kimi run instead of only flipping the record.
+  private readonly foreground = new Map<string, AbortController>();
 
   public constructor(private readonly config: RelayConfig) {
     this.store = new TaskStore(config.dataDir);
@@ -81,7 +85,15 @@ export class TaskService {
     };
     await this.store.create(record);
 
-    if (!input.background) return this.runner.run(id);
+    if (!input.background) {
+      const controller = new AbortController();
+      this.foreground.set(id, controller);
+      try {
+        return await this.runner.run(id, controller.signal);
+      } finally {
+        this.foreground.delete(id);
+      }
+    }
 
     const currentFile = fileURLToPath(import.meta.url);
     const workerPath = join(dirname(currentFile), "worker.js");
@@ -112,6 +124,8 @@ export class TaskService {
   public async cancel(id: string): Promise<TaskRecord> {
     const record = await this.store.get(id);
     if (["completed", "failed", "cancelled", "timed_out"].includes(record.status)) return record;
+    // Foreground run in this process: abort its Kimi session directly.
+    this.foreground.get(id)?.abort();
     if (record.pid !== undefined) {
       try {
         process.kill(record.pid, "SIGTERM");

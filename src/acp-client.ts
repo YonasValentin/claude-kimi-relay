@@ -178,7 +178,7 @@ export class KimiAcpClient {
           }
           if (initializeResponse.protocolVersion !== acp.PROTOCOL_VERSION) {
             throw new RelayError(
-              `Kimi Code speaks ACP protocol version ${initializeResponse.protocolVersion}, but this relay supports version ${acp.PROTOCOL_VERSION}.`,
+              `Kimi Code negotiated ACP protocol version ${initializeResponse.protocolVersion}, which this relay (built for version ${acp.PROTOCOL_VERSION}) does not support. Align the Kimi Code and claude-kimi-relay versions.`,
               "ACP_VERSION_MISMATCH",
             );
           }
