@@ -1,6 +1,8 @@
 # Validation status
 
-Last validated on 2026-07-23 on macOS (arm64) with Node.js 22.16, npm 10.9, Git 2.50, Claude Code (latest), and an authenticated Kimi Code CLI 0.29.0.
+Last validated on 2026-07-23 on macOS (arm64) with Node.js 24.18, Git 2.50, Claude Code (latest), and an authenticated Kimi Code CLI 0.29.0.
+
+A security and correctness audit was applied on 2026-07-23 (see the CHANGELOG hardening entries). On the merged `main`, `npm run verify` passes with **30 test cases** (up from 16), the committed `plugin/dist` matches a fresh build, and a live `review -> delegate -> apply` round-trip against `kimi acp` 0.29.0 completed correctly with the original working tree untouched in every mode. The live runs exercised the happy path, workspace isolation, and the patch boundary on macOS; the Windows process-group termination path and adversarial deny paths are covered by unit tests rather than live runs.
 
 ## Passed on the release machine
 
@@ -18,11 +20,7 @@ Last validated on 2026-07-23 on macOS (arm64) with Node.js 22.16, npm 10.9, Git 
 
 ## Still required before public release
 
-The following depend on decisions or accounts outside the codebase:
+1. **One-time, on npmjs.com (manual, cannot be automated):** configure this repository as a Trusted Publisher for the `claude-kimi-relay` package — package settings → Trusted Publishers → GitHub Actions, repository `YonasValentin/claude-kimi-relay`, workflow `release.yml`. Without it the release workflow's OIDC `npm publish` has no credential.
+2. Tag `v0.1.0` and push it; `release.yml` runs `release:check` + `verify`, then publishes with Sigstore provenance. Verify provenance on npm afterward.
 
-1. Confirm the npm package name and marketplace name are available.
-2. Configure npm Trusted Publishing for `.github/workflows/release.yml` (GitHub Actions OIDC, no long-lived npm token).
-3. Commit `package-lock.json` and the generated `plugin/dist` bundle in the release revision.
-4. Tag `v0.1.0` and verify npm provenance after publication.
-
-The repository is release-candidate source, not a published or vendor-endorsed integration.
+The npm package name `claude-kimi-relay` is available, the version is consistent across `package.json` and both plugin manifests (gated by `release:check`), `package-lock.json` and `plugin/dist` are committed, and `npm pack --dry-run` ships only `dist/` and release documentation. Until the tag is pushed, the repository remains release-candidate source, not a published or vendor-endorsed integration.
