@@ -39,3 +39,24 @@ jobs:
           node-version: 22
       - run: npm ci --no-audit --no-fund
       - run: npm audit --audit-level=high
+
+  # Marketplace installs run the committed plugin/dist directly, so a bundle
+  # that lags src ships an old runtime (missing, e.g., a security fix) even
+  # though CI is green. Rebuild and fail if the committed bundle differs.
+  bundle-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:all
+      - name: Committed plugin/dist must match a fresh build
+        run: |
+          if [ -n "$(git status --porcelain -- plugin/dist)" ]; then
+            echo "::error::plugin/dist is out of sync with src. Run 'npm run build:plugin' and commit the result."
+            git status --porcelain -- plugin/dist
+            git diff -- plugin/dist
+            exit 1
+          fi

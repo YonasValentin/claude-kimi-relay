@@ -14902,12 +14902,20 @@ var SENSITIVE_PATH_PATTERNS = [
   /(?:^|[/\\])\.ssh(?:[/\\]|$)/iu,
   /(?:^|[/\\])\.aws(?:[/\\]|$)/iu,
   /(?:^|[/\\])\.gnupg(?:[/\\]|$)/iu,
-  /(?:^|[/\\])id_(?:rsa|ed25519)(?:\.|$)/iu,
+  /(?:^|[/\\])id_(?:rsa|dsa|ecdsa|ed25519)(?:\.|$)/iu,
   /(?:^|[/\\])(?:credentials?|private[_-]?key|secret[_-]?key)(?:\.|$)/iu,
   /(?:^|[/\\])\.(?:envrc|npmrc|netrc|pypirc|git-credentials)$/iu,
   /(?:^|[/\\])\.docker[/\\]config\.json$/iu,
   /(?:^|[/\\])secrets?\.(?:ya?ml|json|toml)$/iu,
-  /\.tfstate(?:\.backup)?$/iu
+  /\.tfstate(?:\.backup)?$/iu,
+  // Key material and keystores by extension.
+  /\.(?:pem|key|p12|pfx|jks|keystore)$/iu,
+  // Cluster, database, and service-account credential files.
+  /(?:^|[/\\])kubeconfig$/iu,
+  /(?:^|[/\\])\.kube[/\\]config$/iu,
+  /(?:^|[/\\])\.pgpass$/iu,
+  /(?:^|[/\\])\.my\.cnf$/iu,
+  /(?:^|[/\\])[^/\\]*service[_-]?account[^/\\]*\.json$/iu
 ];
 function isContained(root, candidate) {
   const rel = relative(root, candidate);
@@ -14991,11 +14999,13 @@ var SAFE_REVIEW_HINTS = [
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu
 ];
+var MAX_INSPECTABLE_BYTES = 1e5;
 function serializeRequest(request) {
   try {
-    return JSON.stringify(request.toolCall ?? {}).slice(0, 1e5);
+    const serialized = JSON.stringify(request.toolCall ?? {});
+    return serialized.length > MAX_INSPECTABLE_BYTES ? void 0 : serialized;
   } catch {
-    return request.toolCall?.title ?? "";
+    return void 0;
   }
 }
 function optionMatching(options, pattern) {
@@ -15004,6 +15014,9 @@ function optionMatching(options, pattern) {
 var PermissionPolicy = class {
   decide(request, context) {
     const description = serializeRequest(request);
+    if (description === void 0) {
+      return this.cancelOrDeny(request.options);
+    }
     if (DENY_ALWAYS.some((pattern) => pattern.test(description))) {
       return this.cancelOrDeny(request.options);
     }
@@ -15367,6 +15380,7 @@ ${userPrompt}`;
 }
 
 // src/store.ts
+import { randomUUID } from "node:crypto";
 import { open, mkdir as mkdir2, readFile as readFile2, readdir, rename, rm, stat as stat2, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname3, join as join2 } from "node:path";
 var LOCK_TIMEOUT_MS = 1e4;
@@ -15398,26 +15412,22 @@ var TaskStore = class {
   async withLock(id, operation) {
     await this.initialize();
     const path = this.lockPath(id);
+    const token = `${process.pid}:${randomUUID()}`;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     for (; ; ) {
       try {
         const handle = await open(path, "wx", 384);
-        await handle.writeFile(`${process.pid}
-`, "utf8");
+        await handle.writeFile(token, "utf8");
+        await handle.close().catch(() => void 0);
         try {
           return await operation();
         } finally {
-          await handle.close().catch(() => void 0);
-          await rm(path, { force: true }).catch(() => void 0);
+          await this.releaseLock(path, token);
         }
       } catch (error40) {
         const code = error40.code;
         if (code !== "EEXIST") throw error40;
-        const info = await stat2(path).catch(() => void 0);
-        if (info !== void 0 && Date.now() - info.mtimeMs > STALE_LOCK_MS) {
-          await rm(path, { force: true }).catch(() => void 0);
-          continue;
-        }
+        if (await this.reclaimIfDead(path)) continue;
         if (Date.now() >= deadline) {
           throw new RelayError(`Timed out waiting for task ${id} lock.`, "TASK_LOCK_TIMEOUT", {
             cause: error40
@@ -15425,6 +15435,34 @@ var TaskStore = class {
         }
         await sleep(20 + Math.floor(Math.random() * 30));
       }
+    }
+  }
+  // Compare-and-delete: only remove the lock if it still carries our token. If
+  // an over-long stall let another holder steal it, we must not delete theirs.
+  async releaseLock(path, token) {
+    const current = await readFile2(path, "utf8").catch(() => void 0);
+    if (current === token) await rm(path, { force: true }).catch(() => void 0);
+  }
+  // A stale lock is only reclaimed when its recorded holder is actually gone.
+  // A live-but-slow holder keeps its lock, so a waiter fails loudly with a lock
+  // timeout instead of stealing the lock and clobbering an in-flight update.
+  async reclaimIfDead(path) {
+    const info = await stat2(path).catch(() => void 0);
+    if (info === void 0) return true;
+    if (Date.now() - info.mtimeMs <= STALE_LOCK_MS) return false;
+    if (await this.holderAlive(path)) return false;
+    await rm(path, { force: true }).catch(() => void 0);
+    return true;
+  }
+  async holderAlive(path) {
+    const raw = await readFile2(path, "utf8").catch(() => "");
+    const pid = Number.parseInt(raw.split(":")[0] ?? "", 10);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error40) {
+      return error40.code === "EPERM";
     }
   }
   async writeUnlocked(record2) {

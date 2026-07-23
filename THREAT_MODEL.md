@@ -27,4 +27,4 @@
 
 ## Residual risks
 
-This is not an OS sandbox. A sufficiently creative command executed by the current user can bypass string-based command policy or access files available to that user. Malicious repositories can also execute code through existing project scripts. Use a disposable VM or container with restricted mounts and networking for untrusted repositories or high-value source code.
+This is not an OS sandbox. A sufficiently creative command executed by the current user can bypass string-based command policy or access files available to that user. Malicious repositories can also execute code through existing project scripts. The sensitive-path filter is a best-effort denylist of known credential shapes; a secret with an opaque name (for example a service-account key named after its project) can still be copied into the workspace. Use a disposable VM or container with restricted mounts and networking for untrusted repositories or high-value source code.
