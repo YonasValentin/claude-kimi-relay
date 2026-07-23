@@ -212,7 +212,7 @@ init_errors();
 // src/task-service.ts
 init_errors();
 import { spawn as spawn3 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { dirname as dirname5, join as join5, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15422,6 +15422,7 @@ ${userPrompt}`;
 
 // src/store.ts
 init_errors();
+import { randomUUID } from "node:crypto";
 import { open, mkdir as mkdir3, readFile as readFile2, readdir, rename, rm as rm2, stat as stat2, writeFile as writeFile3 } from "node:fs/promises";
 import { dirname as dirname3, join as join3 } from "node:path";
 var LOCK_TIMEOUT_MS = 1e4;
@@ -15453,26 +15454,22 @@ var TaskStore = class {
   async withLock(id, operation) {
     await this.initialize();
     const path = this.lockPath(id);
+    const token = `${process.pid}:${randomUUID()}`;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     for (; ; ) {
       try {
         const handle = await open(path, "wx", 384);
-        await handle.writeFile(`${process.pid}
-`, "utf8");
+        await handle.writeFile(token, "utf8");
+        await handle.close().catch(() => void 0);
         try {
           return await operation();
         } finally {
-          await handle.close().catch(() => void 0);
-          await rm2(path, { force: true }).catch(() => void 0);
+          await this.releaseLock(path, token);
         }
       } catch (error40) {
         const code = error40.code;
         if (code !== "EEXIST") throw error40;
-        const info = await stat2(path).catch(() => void 0);
-        if (info !== void 0 && Date.now() - info.mtimeMs > STALE_LOCK_MS) {
-          await rm2(path, { force: true }).catch(() => void 0);
-          continue;
-        }
+        if (await this.reclaimIfDead(path)) continue;
         if (Date.now() >= deadline) {
           throw new RelayError(`Timed out waiting for task ${id} lock.`, "TASK_LOCK_TIMEOUT", {
             cause: error40
@@ -15480,6 +15477,34 @@ var TaskStore = class {
         }
         await sleep(20 + Math.floor(Math.random() * 30));
       }
+    }
+  }
+  // Compare-and-delete: only remove the lock if it still carries our token. If
+  // an over-long stall let another holder steal it, we must not delete theirs.
+  async releaseLock(path, token) {
+    const current = await readFile2(path, "utf8").catch(() => void 0);
+    if (current === token) await rm2(path, { force: true }).catch(() => void 0);
+  }
+  // A stale lock is only reclaimed when its recorded holder is actually gone.
+  // A live-but-slow holder keeps its lock, so a waiter fails loudly with a lock
+  // timeout instead of stealing the lock and clobbering an in-flight update.
+  async reclaimIfDead(path) {
+    const info = await stat2(path).catch(() => void 0);
+    if (info === void 0) return true;
+    if (Date.now() - info.mtimeMs <= STALE_LOCK_MS) return false;
+    if (await this.holderAlive(path)) return false;
+    await rm2(path, { force: true }).catch(() => void 0);
+    return true;
+  }
+  async holderAlive(path) {
+    const raw = await readFile2(path, "utf8").catch(() => "");
+    const pid = Number.parseInt(raw.split(":")[0] ?? "", 10);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error40) {
+      return error40.code === "EPERM";
     }
   }
   async writeUnlocked(record2) {
@@ -15996,7 +16021,7 @@ var TaskService = class {
   runner;
   async start(request) {
     const input = validateRequest(request, this.config);
-    const id = randomUUID();
+    const id = randomUUID2();
     const at = now2();
     const record2 = {
       id,
