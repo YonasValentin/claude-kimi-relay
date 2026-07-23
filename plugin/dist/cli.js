@@ -16029,6 +16029,11 @@ var TaskService = class {
       stdio: "ignore",
       windowsHide: true
     });
+    child.once("error", (error40) => {
+      void this.markFailed(id, `Could not start background worker: ${toErrorMessage(error40)}`).catch(
+        () => void 0
+      );
+    });
     child.unref();
     return this.store.update(id, (current) => ({
       ...current,
@@ -16041,6 +16046,21 @@ var TaskService = class {
   }
   list(limit) {
     return this.store.list(limit);
+  }
+  markFailed(id, message) {
+    return this.store.update(id, (current) => {
+      if (["completed", "failed", "cancelled", "timed_out"].includes(current.status)) {
+        return current;
+      }
+      const at = now2();
+      return {
+        ...current,
+        status: "failed",
+        updatedAt: at,
+        error: message,
+        events: [...current.events, { at, status: "failed", message }]
+      };
+    });
   }
   async cancel(id) {
     const record2 = await this.store.get(id);
