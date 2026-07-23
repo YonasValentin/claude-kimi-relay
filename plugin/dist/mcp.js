@@ -31739,11 +31739,13 @@ var SAFE_REVIEW_HINTS = [
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu
 ];
+var MAX_INSPECTABLE_BYTES = 1e5;
 function serializeRequest(request) {
   try {
-    return JSON.stringify(request.toolCall ?? {}).slice(0, 1e5);
+    const serialized = JSON.stringify(request.toolCall ?? {});
+    return serialized.length > MAX_INSPECTABLE_BYTES ? void 0 : serialized;
   } catch {
-    return request.toolCall?.title ?? "";
+    return void 0;
   }
 }
 function optionMatching(options, pattern) {
@@ -31752,6 +31754,9 @@ function optionMatching(options, pattern) {
 var PermissionPolicy = class {
   decide(request, context) {
     const description = serializeRequest(request);
+    if (description === void 0) {
+      return this.cancelOrDeny(request.options);
+    }
     if (DENY_ALWAYS.some((pattern) => pattern.test(description))) {
       return this.cancelOrDeny(request.options);
     }
@@ -32598,6 +32603,11 @@ var TaskService = class {
       stdio: "ignore",
       windowsHide: true
     });
+    child.once("error", (error40) => {
+      void this.markFailed(id, `Could not start background worker: ${toErrorMessage(error40)}`).catch(
+        () => void 0
+      );
+    });
     child.unref();
     return this.store.update(id, (current) => ({
       ...current,
@@ -32610,6 +32620,21 @@ var TaskService = class {
   }
   list(limit) {
     return this.store.list(limit);
+  }
+  markFailed(id, message) {
+    return this.store.update(id, (current) => {
+      if (["completed", "failed", "cancelled", "timed_out"].includes(current.status)) {
+        return current;
+      }
+      const at = now2();
+      return {
+        ...current,
+        status: "failed",
+        updatedAt: at,
+        error: message,
+        events: [...current.events, { at, status: "failed", message }]
+      };
+    });
   }
   async cancel(id) {
     const record2 = await this.store.get(id);
