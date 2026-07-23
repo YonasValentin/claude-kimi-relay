@@ -14902,12 +14902,20 @@ var SENSITIVE_PATH_PATTERNS = [
   /(?:^|[/\\])\.ssh(?:[/\\]|$)/iu,
   /(?:^|[/\\])\.aws(?:[/\\]|$)/iu,
   /(?:^|[/\\])\.gnupg(?:[/\\]|$)/iu,
-  /(?:^|[/\\])id_(?:rsa|ed25519)(?:\.|$)/iu,
+  /(?:^|[/\\])id_(?:rsa|dsa|ecdsa|ed25519)(?:\.|$)/iu,
   /(?:^|[/\\])(?:credentials?|private[_-]?key|secret[_-]?key)(?:\.|$)/iu,
   /(?:^|[/\\])\.(?:envrc|npmrc|netrc|pypirc|git-credentials)$/iu,
   /(?:^|[/\\])\.docker[/\\]config\.json$/iu,
   /(?:^|[/\\])secrets?\.(?:ya?ml|json|toml)$/iu,
-  /\.tfstate(?:\.backup)?$/iu
+  /\.tfstate(?:\.backup)?$/iu,
+  // Key material and keystores by extension.
+  /\.(?:pem|key|p12|pfx|jks|keystore)$/iu,
+  // Cluster, database, and service-account credential files.
+  /(?:^|[/\\])kubeconfig$/iu,
+  /(?:^|[/\\])\.kube[/\\]config$/iu,
+  /(?:^|[/\\])\.pgpass$/iu,
+  /(?:^|[/\\])\.my\.cnf$/iu,
+  /(?:^|[/\\])[^/\\]*service[_-]?account[^/\\]*\.json$/iu
 ];
 function isContained(root, candidate) {
   const rel = relative(root, candidate);
@@ -14991,11 +14999,13 @@ var SAFE_REVIEW_HINTS = [
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu
 ];
+var MAX_INSPECTABLE_BYTES = 1e5;
 function serializeRequest(request) {
   try {
-    return JSON.stringify(request.toolCall ?? {}).slice(0, 1e5);
+    const serialized = JSON.stringify(request.toolCall ?? {});
+    return serialized.length > MAX_INSPECTABLE_BYTES ? void 0 : serialized;
   } catch {
-    return request.toolCall?.title ?? "";
+    return void 0;
   }
 }
 function optionMatching(options, pattern) {
@@ -15004,6 +15014,9 @@ function optionMatching(options, pattern) {
 var PermissionPolicy = class {
   decide(request, context) {
     const description = serializeRequest(request);
+    if (description === void 0) {
+      return this.cancelOrDeny(request.options);
+    }
     if (DENY_ALWAYS.some((pattern) => pattern.test(description))) {
       return this.cancelOrDeny(request.options);
     }
