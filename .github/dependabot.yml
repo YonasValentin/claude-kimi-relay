@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions current (Dependabot bumps the pin and
+  # updates the trailing "# v6" comment).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

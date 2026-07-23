@@ -30,3 +30,29 @@ if (failures.length > 0) {
   );
   process.exit(1);
 }
+
+// Version consistency: the plugin manifests and (on a tag push) the pushed tag
+// must all match package.json, so `npm publish` never ships a version the
+// marketplace does not advertise or a tag does not name.
+const pkg = JSON.parse(await readFile("package.json", "utf8"));
+const { version } = pkg;
+const manifestVersions = [
+  ["plugin/.claude-plugin/plugin.json", (json) => json.version],
+  [".claude-plugin/marketplace.json", (json) => json.plugins?.[0]?.version],
+];
+const versionFailures = [];
+for (const [path, pick] of manifestVersions) {
+  const found = pick(JSON.parse(await readFile(path, "utf8")));
+  if (found !== version)
+    versionFailures.push(`${path}: ${found ?? "(missing)"} (expected ${version})`);
+}
+const tag = process.env.GITHUB_REF_NAME ?? "";
+if (/^v\d/u.test(tag) && tag !== `v${version}`) {
+  versionFailures.push(`git tag ${tag} (expected v${version})`);
+}
+if (versionFailures.length > 0) {
+  console.error(
+    `Version does not match package.json ${version}:\n${versionFailures.map((line) => `- ${line}`).join("\n")}`,
+  );
+  process.exit(1);
+}
