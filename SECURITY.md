@@ -31,4 +31,4 @@ Only the latest minor release is supported during the pre-1.0 period.
 
 ## Reporting a vulnerability
 
-Do not open a public issue for an exploitable vulnerability. Use GitHub private vulnerability reporting and include reproduction steps, affected versions, and expected impact.
+Do not open a public issue for an exploitable vulnerability. Report it through [GitHub private vulnerability reporting](https://github.com/YonasValentin/claude-kimi-relay/security/advisories/new). Include reproduction steps, affected versions, and expected impact. Expect an acknowledgement within a few days.
