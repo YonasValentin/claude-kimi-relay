@@ -1,0 +1,4 @@
+# Check out LF on every platform. Windows runners default to core.autocrlf=true,
+# which rewrites the working tree to CRLF and makes Prettier's default
+# endOfLine: "lf" reject every file in the repository.
+* text=auto eol=lf
