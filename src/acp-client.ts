@@ -16,6 +16,7 @@ import { RelayError, toErrorMessage } from "./errors.js";
 import { assertRegularFile, resolveInsideRoot } from "./fs-security.js";
 import { PermissionPolicy } from "./policy.js";
 import { sanitizedAgentEnvironment } from "./process.js";
+import { VERSION } from "./version.js";
 
 export type AgentProgressSink = (message: string) => Promise<void> | void;
 
@@ -192,7 +193,7 @@ export class KimiAcpClient {
                   writeTextFile: mode === "delegate",
                 },
               },
-              clientInfo: { name: "claude-kimi-relay", version: "0.1.0" },
+              clientInfo: { name: "claude-kimi-relay", version: VERSION },
             });
           } catch (error) {
             if (error instanceof acp.RequestError && error.code === -32000) {

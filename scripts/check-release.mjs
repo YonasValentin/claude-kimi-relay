@@ -46,6 +46,11 @@ for (const [path, pick] of manifestVersions) {
   if (found !== version)
     versionFailures.push(`${path}: ${found ?? "(missing)"} (expected ${version})`);
 }
+const versionSource = await readFile("src/version.ts", "utf8");
+const sourceVersion = /export const VERSION = "([^"]*)";/u.exec(versionSource)?.[1];
+if (sourceVersion !== version) {
+  versionFailures.push(`src/version.ts: ${sourceVersion ?? "(missing)"} (expected ${version})`);
+}
 const tag = process.env.GITHUB_REF_NAME ?? "";
 if (/^v\d/u.test(tag) && tag !== `v${version}`) {
   versionFailures.push(`git tag ${tag} (expected v${version})`);

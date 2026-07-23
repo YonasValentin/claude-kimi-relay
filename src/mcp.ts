@@ -9,10 +9,11 @@ import { runDoctor } from "./doctor.js";
 import { RelayError } from "./errors.js";
 import { TaskService } from "./task-service.js";
 import type { TaskRecord } from "./types.js";
+import { VERSION } from "./version.js";
 
 const config = loadConfig();
 const tasks = new TaskService(config);
-const server = new McpServer({ name: "claude-kimi-relay", version: "0.1.0" });
+const server = new McpServer({ name: "claude-kimi-relay", version: VERSION });
 
 function text(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
