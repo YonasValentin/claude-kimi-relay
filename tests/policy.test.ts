@@ -47,3 +47,28 @@ void test("delegate rejects network tools and dependency installation", () => {
     assert.deepEqual(result, { outcome: "selected", optionId: "deny" });
   }
 });
+
+void test("DENY_ALWAYS blocks destructive and credential commands in both modes", () => {
+  const denied = [
+    "Run sudo apt-get install",
+    "Run git push origin main",
+    "Run ssh user@host",
+    "Run scp file user@host:/tmp",
+    "Run rsync -a . remote:/data",
+    "cat /etc/passwd",
+    "Run chmod 777 /srv",
+    "Run dd if=/dev/zero of=/dev/disk2",
+    "Run mkfs.ext4 /dev/disk2",
+    "Run rm -rf /",
+    "Run cat ./.env.local",
+  ];
+  for (const title of denied) {
+    for (const mode of ["review", "delegate"] as const) {
+      const result = policy.decide(
+        { toolCall: { title }, options },
+        { mode, workspaceDir: "/tmp/workspace" },
+      );
+      assert.deepEqual(result, { outcome: "selected", optionId: "deny" }, `${mode}: ${title}`);
+    }
+  }
+});

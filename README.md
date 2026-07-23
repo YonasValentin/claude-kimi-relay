@@ -134,6 +134,8 @@ claude-kimi-relay apply <task-id> --project .
 
 `apply` runs `git apply --check` first, so a patch that would not apply cleanly never touches your project.
 
+Foreground and background differ by entry point. The MCP `start_task` tool runs in the background by default, so Claude Code returns a task ID immediately and you poll with `get_task`. The `claude-kimi-relay start` CLI runs in the foreground and blocks until the task finishes unless you pass `--background`.
+
 ## Task lifecycle
 
 ```text
@@ -190,7 +192,7 @@ MCP v2 beta and the experimental ACP methods are deliberately left alone.
 
 ## What has actually been verified
 
-`npm run verify` runs Prettier, ESLint (strict type-checked plus `eslint-plugin-security`, zero warnings allowed), `tsc --noEmit` under strict settings, 14 tests, and a clean build of both the npm output and the plugin bundle.
+`npm run verify` runs Prettier, ESLint (strict type-checked plus `eslint-plugin-security`, zero warnings allowed), `tsc --noEmit` under strict settings, the test suite, and a clean build of both the npm output and the plugin bundle.
 
 The tests cover the places where a mistake would be expensive: lexical path traversal, symlink escape, secret-path blocking, writes through a symlinked workspace root, permission decisions for reads, writes, publishing, network tools, dependency installation and commits, atomic persistence under concurrent updates, removal of the original Git history, and the guarantee that a delegate patch carries only Kimi's changes.
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { resolveInsideRoot } from "../src/fs-security.js";
+import { assertRegularFile, resolveInsideRoot } from "../src/fs-security.js";
 
 void test("resolveInsideRoot rejects lexical traversal", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "relay-root-"));
@@ -81,4 +81,16 @@ void test("resolveInsideRoot accepts absolute paths when the root sits behind a 
     await resolveInsideRoot(linkRoot, join(linkRoot, "file.txt")),
     join(root, "file.txt"),
   );
+});
+
+void test("assertRegularFile rejects directories and oversized files", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-file-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await mkdir(join(root, "adir"));
+  await assert.rejects(() => assertRegularFile(join(root, "adir"), 1_000_000), /regular file/iu);
+
+  await writeFile(join(root, "big.txt"), "x".repeat(50));
+  await assert.rejects(() => assertRegularFile(join(root, "big.txt"), 10), /safety limit/iu);
+  await assert.doesNotReject(() => assertRegularFile(join(root, "big.txt"), 1_000));
 });
