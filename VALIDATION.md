@@ -12,6 +12,7 @@ Last validated on 2026-07-23 on macOS (arm64) with Node.js 22.16, npm 10.9, Git 
 - Workspace tests for user-change baselining, Kimi-only patch generation, sensitive-file exclusion, and removal of original Git history.
 - `claude plugin validate ./plugin --strict` and `claude plugin validate . --strict` — both passed.
 - `npm pack --dry-run` — tarball contains only `dist/` and release documentation.
+- GitHub Actions CI — the full `npm run verify` pipeline plus `npm pack --dry-run` and the plugin-bundle check passed on Ubuntu, macOS, and Windows against Node.js 22 and 24. Windows required a `.gitattributes` `eol=lf` rule, because runners check out with `core.autocrlf=true` and Prettier's default `endOfLine: "lf"` then rejects every file.
 - Live MCP smoke test over stdio: `tools/list`, schema shape checks, `doctor`, `start_task`, `get_task`, `list_tasks`, `cancel_task`.
 - Live end-to-end ACP smoke test against an authenticated `kimi acp`: a background `review` task transitioned `queued → preparing_workspace → starting_agent → running → validating → completed` and returned a correct textual result; review mode modified no files.
 
