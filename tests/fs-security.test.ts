@@ -57,13 +57,22 @@ void test("resolveInsideRoot blocks token and state files that are not dotenv fi
     ".docker/config.json",
     "deploy/secrets.yaml",
     "infra/terraform.tfstate",
+    "deploy/tls.key",
+    "certs/server.pem",
+    "keystore.jks",
+    "app.p12",
+    "kubeconfig",
+    ".kube/config",
+    ".pgpass",
+    ".my.cnf",
+    "keys/id_ecdsa",
+    "gcp-service-account.json",
   ]) {
     await assert.rejects(() => resolveInsideRoot(root, path), /credential|secret/iu, path);
   }
-  assert.equal(
-    await resolveInsideRoot(root, "src/secretsmith.ts"),
-    join(root, "src/secretsmith.ts"),
-  );
+  for (const path of ["src/secretsmith.ts", "src/monkey.ts", "docs/keyboard.md", "account.json"]) {
+    assert.equal(await resolveInsideRoot(root, path), join(root, path), path);
+  }
 });
 
 void test("resolveInsideRoot accepts absolute paths when the root sits behind a symlink", async (t) => {
