@@ -3,17 +3,29 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { RelayError } from "./errors.js";
 
+// Best-effort denylist: files matching these are kept out of the isolated
+// workspace and refused over the ACP bridge. It cannot catch every secret
+// (e.g. a service-account key with an opaque name), so untrusted repositories
+// should still be run in a disposable VM. See THREAT_MODEL.md.
 const SENSITIVE_PATH_PATTERNS = [
   /(?:^|[/\\])\.env(?:$|\.(?!example$|sample$|template$))/iu,
   /(?:^|[/\\])\.ssh(?:[/\\]|$)/iu,
   /(?:^|[/\\])\.aws(?:[/\\]|$)/iu,
   /(?:^|[/\\])\.gnupg(?:[/\\]|$)/iu,
-  /(?:^|[/\\])id_(?:rsa|ed25519)(?:\.|$)/iu,
+  /(?:^|[/\\])id_(?:rsa|dsa|ecdsa|ed25519)(?:\.|$)/iu,
   /(?:^|[/\\])(?:credentials?|private[_-]?key|secret[_-]?key)(?:\.|$)/iu,
   /(?:^|[/\\])\.(?:envrc|npmrc|netrc|pypirc|git-credentials)$/iu,
   /(?:^|[/\\])\.docker[/\\]config\.json$/iu,
   /(?:^|[/\\])secrets?\.(?:ya?ml|json|toml)$/iu,
   /\.tfstate(?:\.backup)?$/iu,
+  // Key material and keystores by extension.
+  /\.(?:pem|key|p12|pfx|jks|keystore)$/iu,
+  // Cluster, database, and service-account credential files.
+  /(?:^|[/\\])kubeconfig$/iu,
+  /(?:^|[/\\])\.kube[/\\]config$/iu,
+  /(?:^|[/\\])\.pgpass$/iu,
+  /(?:^|[/\\])\.my\.cnf$/iu,
+  /(?:^|[/\\])[^/\\]*service[_-]?account[^/\\]*\.json$/iu,
 ];
 
 export function isContained(root: string, candidate: string): boolean {

@@ -43,15 +43,39 @@ function extractProgress(update: unknown): string | undefined {
 
 const TERMINATE_GRACE_MS = 2000;
 
+// Signal the child, or its whole process group when `group` is set and the
+// child was spawned detached (its own group leader). A group signal reaches
+// helpers Kimi spawned — language servers, watchers — that would otherwise be
+// reparented to init and leak; a plain kill hits only the direct child.
+function signalChild(child: ChildProcess, signal: NodeJS.Signals, group: boolean): void {
+  if (group && process.platform !== "win32" && typeof child.pid === "number") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Group gone or never a leader; fall back to the direct child handle.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Child already exited.
+  }
+}
+
 // `kimi acp` does not exit on SIGTERM. A live child handle keeps the relay's
 // event loop alive, so without escalating to SIGKILL every finished task
 // leaves its worker and its Kimi process running forever.
-export async function terminate(child: ChildProcess): Promise<void> {
+export async function terminate(
+  child: ChildProcess,
+  options: { readonly group?: boolean } = {},
+): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  const group = options.group ?? false;
   const exited = once(child, "exit").then(() => true);
-  child.kill("SIGTERM");
+  signalChild(child, "SIGTERM", group);
   if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)])) return;
-  child.kill("SIGKILL");
+  signalChild(child, "SIGKILL", group);
   await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)]);
 }
 
@@ -76,6 +100,10 @@ export class KimiAcpClient {
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       signal: controller.signal,
+      // Own process group (POSIX) so termination can signal Kimi and every
+      // helper it spawns, not just the direct child. Not unref'd — the relay
+      // still awaits the protocol and reaps the group in the finally below.
+      detached: process.platform !== "win32",
       windowsHide: true,
     });
 
@@ -239,7 +267,7 @@ export class KimiAcpClient {
     } finally {
       clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", onExternalAbort);
-      await terminate(child);
+      await terminate(child, { group: true });
     }
   }
 }

@@ -33,11 +33,20 @@ const SAFE_REVIEW_HINTS = [
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu,
 ];
 
-function serializeRequest(request: PermissionRequestLike): string {
+// A permission request whose serialization exceeds this cannot be fully
+// inspected by the deny list. Truncating it (the previous behaviour) let a
+// caller hide a denied command behind >100KB of padding so `DENY_ALWAYS` never
+// saw it; in delegate mode, where the deny list is the only content gate, that
+// silently failed OPEN. Un-inspectable requests are now rejected (fail closed),
+// matching how review mode refuses anything it cannot positively classify.
+const MAX_INSPECTABLE_BYTES = 100_000;
+
+function serializeRequest(request: PermissionRequestLike): string | undefined {
   try {
-    return JSON.stringify(request.toolCall ?? {}).slice(0, 100_000);
+    const serialized = JSON.stringify(request.toolCall ?? {});
+    return serialized.length > MAX_INSPECTABLE_BYTES ? undefined : serialized;
   } catch {
-    return request.toolCall?.title ?? "";
+    return undefined;
   }
 }
 
@@ -56,6 +65,11 @@ export class PermissionPolicy {
     | { readonly outcome: "selected"; readonly optionId: string }
     | { readonly outcome: "cancelled" } {
     const description = serializeRequest(request);
+
+    // Un-serializable or too large to inspect: cannot be proven safe -> deny.
+    if (description === undefined) {
+      return this.cancelOrDeny(request.options);
+    }
 
     if (DENY_ALWAYS.some((pattern) => pattern.test(description))) {
       return this.cancelOrDeny(request.options);

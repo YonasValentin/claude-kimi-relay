@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -67,4 +67,35 @@ void test("TaskStore serializes concurrent updates without losing events", async
     ),
   );
   assert.equal((await store.get(task.id)).events.length, 20);
+});
+
+void test("update reclaims a stale lock abandoned by a dead holder", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "relay-lock-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new TaskStore(dir);
+  const at = new Date().toISOString();
+  const task: TaskRecord = {
+    id: "323e4567-e89b-12d3-a456-426614174000",
+    kind: "review",
+    prompt: "Review",
+    projectDir: "/tmp/project",
+    baseRef: "HEAD",
+    background: false,
+    keepWorkspace: false,
+    timeoutMs: 10_000,
+    createdAt: at,
+    updatedAt: at,
+    status: "queued",
+    events: [],
+  };
+  await store.create(task);
+
+  // Forge a stale lock owned by a pid that cannot exist, with an old mtime.
+  const lockPath = join(dir, "tasks", `${task.id}.lock`);
+  await writeFile(lockPath, "2147483647:dead", "utf8");
+  const stale = new Date(Date.now() - 5 * 60_000);
+  await utimes(lockPath, stale, stale);
+
+  const updated = await store.update(task.id, (current) => ({ ...current, status: "running" }));
+  assert.equal(updated.status, "running");
 });

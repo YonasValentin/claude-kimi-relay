@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { RelayConfig, TaskKind, TaskRecord, TaskRequest } from "./types.js";
-import { RelayError } from "./errors.js";
+import { RelayError, toErrorMessage } from "./errors.js";
 import { TaskRunner } from "./runner.js";
 import { TaskStore } from "./store.js";
 
@@ -105,6 +105,16 @@ export class TaskService {
       stdio: "ignore",
       windowsHide: true,
     });
+    // A detached worker that fails to spawn (EMFILE / ENOMEM under memory
+    // pressure, a missing cwd) emits 'error' asynchronously, after start() has
+    // already returned. With no listener that becomes an uncaught exception and
+    // takes down the long-lived MCP server, stranding every task. Record the
+    // failure on the task instead of crashing the process.
+    child.once("error", (error) => {
+      void this.markFailed(id, `Could not start background worker: ${toErrorMessage(error)}`).catch(
+        () => undefined,
+      );
+    });
     child.unref();
     return this.store.update(id, (current) => ({
       ...current,
@@ -119,6 +129,22 @@ export class TaskService {
 
   public list(limit?: number): Promise<readonly TaskRecord[]> {
     return this.store.list(limit);
+  }
+
+  private markFailed(id: string, message: string): Promise<TaskRecord> {
+    return this.store.update(id, (current) => {
+      if (["completed", "failed", "cancelled", "timed_out"].includes(current.status)) {
+        return current;
+      }
+      const at = now();
+      return {
+        ...current,
+        status: "failed",
+        updatedAt: at,
+        error: message,
+        events: [...current.events, { at, status: "failed", message }],
+      };
+    });
   }
 
   public async cancel(id: string): Promise<TaskRecord> {

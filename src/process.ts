@@ -90,7 +90,23 @@ export async function runCommand(
   }
 }
 
+// Proxy URLs frequently embed credentials (http://user:pass@host). Forward the
+// proxy setting so Kimi can reach its API from behind a corporate proxy, but
+// strip the userinfo first so the agent never receives the password.
+function stripProxyCredentials(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.username === "" && url.password === "") return value;
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 export function sanitizedAgentEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const proxyKeys = new Set(["HTTP_PROXY", "HTTPS_PROXY"]);
   const allowedPrefixes = ["KIMI_", "MOONSHOT_", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
   const allowedNames = new Set([
     "PATH",
@@ -108,9 +124,14 @@ export function sanitizedAgentEnvironment(env: NodeJS.ProcessEnv = process.env):
   ]);
 
   return Object.fromEntries(
-    Object.entries(env).filter(([key, value]) => {
-      if (value === undefined) return false;
-      return allowedNames.has(key) || allowedPrefixes.some((prefix) => key.startsWith(prefix));
-    }),
+    Object.entries(env)
+      .filter(([key, value]) => {
+        if (value === undefined) return false;
+        return allowedNames.has(key) || allowedPrefixes.some((prefix) => key.startsWith(prefix));
+      })
+      .map(([key, value]) => [
+        key,
+        proxyKeys.has(key) ? stripProxyCredentials(value ?? "") : value,
+      ]),
   );
 }
