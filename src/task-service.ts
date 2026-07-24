@@ -3,10 +3,21 @@ import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { RelayConfig, TaskKind, TaskRecord, TaskRequest } from "./types.js";
+import type { RelayConfig, TaskKind, TaskRecord, TaskRequest, TaskStatus } from "./types.js";
 import { RelayError, toErrorMessage } from "./errors.js";
-import { TaskRunner } from "./runner.js";
+import { capEvents, TaskRunner } from "./runner.js";
 import { TaskStore } from "./store.js";
+
+const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled", "timed_out"]);
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // signal 0 probes existence without killing
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"; // exists under another user
+  }
+}
 
 interface ValidatedTaskRequest {
   readonly kind: TaskKind;
@@ -31,7 +42,10 @@ function validateRequest(request: TaskRequest, config: RelayConfig): ValidatedTa
   }
 
   const trimmedBaseRef = request.baseRef?.trim();
-  const baseRef = trimmedBaseRef === undefined || trimmedBaseRef === "" ? "HEAD" : trimmedBaseRef;
+  // Empty is the "auto" sentinel: the workspace resolves it to the upstream
+  // merge-base for review/challenge, or the current tree for delegate. An
+  // explicit ref (including "HEAD") is kept verbatim.
+  const baseRef = trimmedBaseRef ?? "";
   if (baseRef.startsWith("-") || /[\0\r\n]/u.test(baseRef)) {
     throw new RelayError("baseRef is not a safe Git revision.", "INVALID_BASE_REF");
   }
@@ -123,6 +137,34 @@ export class TaskService {
     }));
   }
 
+  // Reconcile tasks left in a non-terminal state by a process that has since
+  // died (server restart, or a SIGKILL/OOM of a background worker that skipped
+  // its terminal write). Without this they are reported as running forever. A
+  // still-alive owner — e.g. a detached worker that outlived its parent server
+  // — is left untouched, and queued tasks (not yet started, no owner) are left
+  // for their worker to pick up. Call at server/CLI startup.
+  // ponytail: liveness is a pid probe; a reused pid could look alive. The window
+  // is a crash-to-next-startup gap and the fix is a pidfile/start-time token if
+  // it ever matters.
+  public async reconcileOrphans(): Promise<void> {
+    const records = await this.store.list(100);
+    await Promise.all(
+      records.map(async (record) => {
+        if (TERMINAL_STATUSES.has(record.status)) return;
+        // The owner is the run executor (ownerPid) once it has claimed the task,
+        // or the spawned worker (pid) for a background task still queued. A task
+        // with neither is a foreground run about to start in this process — leave
+        // it. Only a dead, known owner is reconciled.
+        const owner = record.ownerPid ?? record.pid;
+        if (owner === undefined || isProcessAlive(owner)) return;
+        await this.markFailed(
+          record.id,
+          "Task owner process is no longer running; reconciled to failed after restart.",
+        ).catch(() => undefined);
+      }),
+    );
+  }
+
   public get(id: string): Promise<TaskRecord> {
     return this.store.get(id);
   }
@@ -142,7 +184,7 @@ export class TaskService {
         status: "failed",
         updatedAt: at,
         error: message,
-        events: [...current.events, { at, status: "failed", message }],
+        events: capEvents([...current.events, { at, status: "failed", message }]),
       };
     });
   }
@@ -167,10 +209,10 @@ export class TaskService {
         ...current,
         status: "cancelled",
         updatedAt: at,
-        events: [
+        events: capEvents([
           ...current.events,
           { at, status: "cancelled", message: "Cancellation requested." },
-        ],
+        ]),
       };
     });
   }

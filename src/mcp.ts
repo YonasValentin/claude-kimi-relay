@@ -79,8 +79,10 @@ server.registerTool(
         .describe("Run detached and poll with get_task, or block until the task finishes."),
       baseRef: z
         .string()
-        .default("HEAD")
-        .describe("Git revision used as the comparison baseline for review and challenge tasks."),
+        .optional()
+        .describe(
+          "Git revision used as the comparison baseline for review and challenge tasks. Omit to auto-select the merge-base with the branch's upstream.",
+        ),
       timeoutMs: z
         .number()
         .int()
@@ -102,7 +104,7 @@ server.registerTool(
           prompt: input.prompt,
           projectDir: resolveProjectDir(input.projectDir),
           background: input.background,
-          baseRef: input.baseRef,
+          ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
           ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
           keepWorkspace: input.keepWorkspace,
         }),
@@ -181,6 +183,10 @@ server.registerTool(
   },
   async () => text(await runDoctor(config)),
 );
+
+// Reconcile tasks orphaned by a previous server/worker that died mid-run before
+// accepting new work, so a crashed run is not reported as running forever.
+await tasks.reconcileOrphans().catch(() => undefined);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

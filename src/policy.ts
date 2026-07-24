@@ -25,6 +25,11 @@ const MUTATION_HINTS = [
   /\bwrite\b|\bedit\b|\bdelete\b|\bremove\b|\bmove\b|\brename\b|\bpatch\b/iu,
   /\binstall\b|\bpublish\b|\bdeploy\b|\bcommit\b|\bpush\b/iu,
   /\bmkdir\b|\btouch\b|\btruncate\b/iu,
+  // Writer binaries a "safe" read verb could shell out to.
+  /\b(?:tee|cp|mv|rm|rmdir|mkfifo)\b/iu,
+  // find(1) actions that write or execute, so `find . -fprint`/`-exec`/`-delete`
+  // cannot pass as a read.
+  /(?:^|\s)-(?:exec|execdir|ok|delete|fprint|fprintf|fprint0)\b/iu,
 ];
 
 const SAFE_REVIEW_HINTS = [
@@ -32,6 +37,15 @@ const SAFE_REVIEW_HINTS = [
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu,
 ];
+
+// Shell operators that can smuggle a write past a safe-read verb (a redirect,
+// append, pipe-into-writer, or command chain — including a bare `&`, and a
+// newline/CR which JSON-serializes to `\n`/`\r` in the inspected string). In
+// review mode any command carrying one is treated as mutating: a leading
+// `cat`/`grep` must not launder a trailing `> ~/.bashrc`, `; rm ...`, or a
+// second line. This is best-effort defense-in-depth over a string policy, not
+// a sandbox — see THREAT_MODEL.md; untrusted repos still warrant OS isolation.
+const SHELL_CHAIN = /(?:>>?|\||;|&|`|\$\(|\\n|\\r)/u;
 
 // A permission request whose serialization exceeds this cannot be fully
 // inspected by the deny list. Truncating it (the previous behaviour) let a
@@ -57,6 +71,22 @@ function optionMatching(
   return options.find((option) => pattern.test(`${option.kind ?? ""} ${option.name ?? ""}`));
 }
 
+// Select an allow option WITHOUT ever granting a session-wide `*_always` grant:
+// a conforming agent records those persistently and stops re-requesting, which
+// would defeat the deny-first gate after a single approval. Prefer an explicit
+// one-shot allow; otherwise a non-"always" allow; never an "always" option.
+function selectAllow(options: readonly PermissionOptionLike[]): PermissionOptionLike | undefined {
+  const isAlways = (option: PermissionOptionLike): boolean =>
+    /always/iu.test(`${option.kind ?? ""} ${option.name ?? ""}`);
+  const oneShot = options.find((option) => option.kind === "allow_once");
+  if (oneShot) return oneShot;
+  return options.find(
+    (option) =>
+      !isAlways(option) &&
+      /allow|approve|accept/iu.test(`${option.kind ?? ""} ${option.name ?? ""}`),
+  );
+}
+
 export class PermissionPolicy {
   public decide(
     request: PermissionRequestLike,
@@ -76,12 +106,14 @@ export class PermissionPolicy {
     }
 
     if (context.mode === "review") {
-      const mutating = MUTATION_HINTS.some((pattern) => pattern.test(description));
+      const mutating =
+        MUTATION_HINTS.some((pattern) => pattern.test(description)) ||
+        SHELL_CHAIN.test(description);
       const safeRead = SAFE_REVIEW_HINTS.some((pattern) => pattern.test(description));
       if (mutating || !safeRead) return this.cancelOrDeny(request.options);
     }
 
-    const allow = optionMatching(request.options, /allow|approve|accept/iu);
+    const allow = selectAllow(request.options);
     return allow ? { outcome: "selected", optionId: allow.optionId } : { outcome: "cancelled" };
   }
 
@@ -90,7 +122,10 @@ export class PermissionPolicy {
   ):
     | { readonly outcome: "selected"; readonly optionId: string }
     | { readonly outcome: "cancelled" } {
-    const deny = optionMatching(options, /deny|reject/iu);
+    // Prefer a one-shot reject so we never leave a persistent session decision.
+    const deny =
+      options.find((option) => option.kind === "reject_once") ??
+      optionMatching(options, /deny|reject/iu);
     return deny ? { outcome: "selected", optionId: deny.optionId } : { outcome: "cancelled" };
   }
 }

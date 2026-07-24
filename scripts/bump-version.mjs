@@ -33,13 +33,18 @@ await writeFile(
   source.replace(/export const VERSION = "[^"]*";/u, `export const VERSION = "${version}";`),
 );
 
+// On Windows npm/npx are .cmd shims; execFileSync with the default shell:false
+// throws EINVAL when spawning a .cmd. Use the platform-correct binary name.
+const npx = process.platform === "win32" ? "npx.cmd" : "npx";
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+
 // Normalize to the repo's Prettier format so `npm run verify` stays green.
-execFileSync("npx", ["prettier", "--write", versionSource, ...targets.map(([path]) => path)], {
+execFileSync(npx, ["prettier", "--write", versionSource, ...targets.map(([path]) => path)], {
   stdio: "inherit",
 });
 
 // The committed plugin/dist is what marketplace users run, so keep it current.
-execFileSync("npm", ["run", "build:plugin"], { stdio: "inherit" });
+execFileSync(npm, ["run", "build:plugin"], { stdio: "inherit" });
 
 console.log(
   `\nSet version ${version} in package.json, both plugin manifests, and src/version.ts, and rebuilt plugin/dist.`,

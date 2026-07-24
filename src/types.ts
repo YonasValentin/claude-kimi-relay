@@ -55,6 +55,10 @@ export interface TaskRecord {
   readonly status: TaskStatus;
   readonly events: readonly TaskEvent[];
   readonly pid?: number;
+  // PID of the process actually executing the task (the background worker, or
+  // the server/CLI process for a foreground run). Used to reconcile tasks left
+  // in a non-terminal state after that process dies.
+  readonly ownerPid?: number;
   readonly workspaceDir?: string;
   readonly sessionId?: string;
   readonly result?: TaskResult;

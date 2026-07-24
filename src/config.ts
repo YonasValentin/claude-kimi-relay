@@ -18,6 +18,22 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+// Like positiveInteger, but reject values outside [min, max]. A default timeout
+// below the request-validation floor (or above its ceiling) would otherwise make
+// every default-timeout task throw INVALID_TIMEOUT — a silent, total breakage.
+function boundedInteger(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const parsed = positiveInteger(value, fallback);
+  return parsed < min || parsed > max ? fallback : parsed;
+}
+
+const MIN_TIMEOUT_MS = 10_000;
+const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
   const dataDir = resolve(
     env.CLAUDE_KIMI_RELAY_DATA_DIR ??
@@ -30,7 +46,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     dataDir,
     ...(env.CLAUDE_PROJECT_DIR?.trim() ? { projectDir: resolve(env.CLAUDE_PROJECT_DIR) } : {}),
     kimiCliPath: kimiCliPath === undefined || kimiCliPath === "" ? "kimi" : kimiCliPath,
-    defaultTimeoutMs: positiveInteger(env.CLAUDE_KIMI_RELAY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    defaultTimeoutMs: boundedInteger(
+      env.CLAUDE_KIMI_RELAY_TIMEOUT_MS,
+      DEFAULT_TIMEOUT_MS,
+      MIN_TIMEOUT_MS,
+      MAX_TIMEOUT_MS,
+    ),
     maxFileBytes: positiveInteger(env.CLAUDE_KIMI_RELAY_MAX_FILE_BYTES, DEFAULT_MAX_FILE_BYTES),
     maxWorkspaceBytes: positiveInteger(
       env.CLAUDE_KIMI_RELAY_MAX_WORKSPACE_BYTES,

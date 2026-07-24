@@ -75,9 +75,9 @@ export async function terminate(
   const group = options.group ?? false;
   const exited = once(child, "exit").then(() => true);
   signalChild(child, "SIGTERM", group);
-  if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)])) return;
+  if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false, { ref: false })])) return;
   signalChild(child, "SIGKILL", group);
-  await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)]);
+  await Promise.race([exited, delay(TERMINATE_GRACE_MS, false, { ref: false })]);
 }
 
 export class KimiAcpClient {

@@ -5,6 +5,17 @@ import { join } from "node:path";
 import type { DoctorCheck, RelayConfig } from "./types.js";
 import { runCommand } from "./process.js";
 
+// The package declares engines.node ">=22.14"; doctor must enforce the same
+// floor, not just the major version, so a green tick never contradicts the
+// stated minimum.
+export function meetsNodeFloor(version: string): boolean {
+  const parts = version.replace(/^v/u, "").split(".");
+  const major = Number.parseInt(parts[0] ?? "", 10);
+  const minor = Number.parseInt(parts[1] ?? "", 10);
+  if (!Number.isInteger(major)) return false;
+  return major > 22 || (major === 22 && (Number.isInteger(minor) ? minor : 0) >= 14);
+}
+
 async function commandCheck(
   name: string,
   command: string,
@@ -44,7 +55,7 @@ export async function runDoctor(config: RelayConfig): Promise<readonly DoctorChe
   const checks: DoctorCheck[] = [];
   checks.push({
     name: "Node.js",
-    ok: Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) >= 22,
+    ok: meetsNodeFloor(process.versions.node),
     detail: `${process.version} (requires Node.js 22.14 or newer)`,
   });
   checks.push(await commandCheck("Git", "git", ["--version"]));

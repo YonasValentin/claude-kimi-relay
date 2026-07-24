@@ -19,6 +19,12 @@ function positiveInteger(value, fallback) {
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
+function boundedInteger(value, fallback, min, max) {
+  const parsed = positiveInteger(value, fallback);
+  return parsed < min || parsed > max ? fallback : parsed;
+}
+var MIN_TIMEOUT_MS = 1e4;
+var MAX_TIMEOUT_MS = 24 * 60 * 60 * 1e3;
 function loadConfig(env = process.env) {
   const dataDir = resolve(
     env.CLAUDE_KIMI_RELAY_DATA_DIR ?? env.CLAUDE_PLUGIN_DATA ?? join(homedir(), ".claude-kimi-relay")
@@ -28,7 +34,12 @@ function loadConfig(env = process.env) {
     dataDir,
     ...env.CLAUDE_PROJECT_DIR?.trim() ? { projectDir: resolve(env.CLAUDE_PROJECT_DIR) } : {},
     kimiCliPath: kimiCliPath === void 0 || kimiCliPath === "" ? "kimi" : kimiCliPath,
-    defaultTimeoutMs: positiveInteger(env.CLAUDE_KIMI_RELAY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    defaultTimeoutMs: boundedInteger(
+      env.CLAUDE_KIMI_RELAY_TIMEOUT_MS,
+      DEFAULT_TIMEOUT_MS,
+      MIN_TIMEOUT_MS,
+      MAX_TIMEOUT_MS
+    ),
     maxFileBytes: positiveInteger(env.CLAUDE_KIMI_RELAY_MAX_FILE_BYTES, DEFAULT_MAX_FILE_BYTES),
     maxWorkspaceBytes: positiveInteger(
       env.CLAUDE_KIMI_RELAY_MAX_WORKSPACE_BYTES,
@@ -14994,13 +15005,19 @@ var DENY_ALWAYS = [
 var MUTATION_HINTS = [
   /\bwrite\b|\bedit\b|\bdelete\b|\bremove\b|\bmove\b|\brename\b|\bpatch\b/iu,
   /\binstall\b|\bpublish\b|\bdeploy\b|\bcommit\b|\bpush\b/iu,
-  /\bmkdir\b|\btouch\b|\btruncate\b/iu
+  /\bmkdir\b|\btouch\b|\btruncate\b/iu,
+  // Writer binaries a "safe" read verb could shell out to.
+  /\b(?:tee|cp|mv|rm|rmdir|mkfifo)\b/iu,
+  // find(1) actions that write or execute, so `find . -fprint`/`-exec`/`-delete`
+  // cannot pass as a read.
+  /(?:^|\s)-(?:exec|execdir|ok|delete|fprint|fprintf|fprint0)\b/iu
 ];
 var SAFE_REVIEW_HINTS = [
   /\bread\b|\bview\b|\bsearch\b|\bfind\b|\blist\b|\bglob\b|\bgrep\b|\brg\b/iu,
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu
 ];
+var SHELL_CHAIN = /(?:>>?|\||;|&|`|\$\(|\\n|\\r)/u;
 var MAX_INSPECTABLE_BYTES = 1e5;
 function serializeRequest(request) {
   try {
@@ -15013,6 +15030,14 @@ function serializeRequest(request) {
 function optionMatching(options, pattern) {
   return options.find((option) => pattern.test(`${option.kind ?? ""} ${option.name ?? ""}`));
 }
+function selectAllow(options) {
+  const isAlways = (option) => /always/iu.test(`${option.kind ?? ""} ${option.name ?? ""}`);
+  const oneShot = options.find((option) => option.kind === "allow_once");
+  if (oneShot) return oneShot;
+  return options.find(
+    (option) => !isAlways(option) && /allow|approve|accept/iu.test(`${option.kind ?? ""} ${option.name ?? ""}`)
+  );
+}
 var PermissionPolicy = class {
   decide(request, context) {
     const description = serializeRequest(request);
@@ -15023,15 +15048,15 @@ var PermissionPolicy = class {
       return this.cancelOrDeny(request.options);
     }
     if (context.mode === "review") {
-      const mutating = MUTATION_HINTS.some((pattern) => pattern.test(description));
+      const mutating = MUTATION_HINTS.some((pattern) => pattern.test(description)) || SHELL_CHAIN.test(description);
       const safeRead = SAFE_REVIEW_HINTS.some((pattern) => pattern.test(description));
       if (mutating || !safeRead) return this.cancelOrDeny(request.options);
     }
-    const allow = optionMatching(request.options, /allow|approve|accept/iu);
+    const allow = selectAllow(request.options);
     return allow ? { outcome: "selected", optionId: allow.optionId } : { outcome: "cancelled" };
   }
   cancelOrDeny(options) {
-    const deny = optionMatching(options, /deny|reject/iu);
+    const deny = options.find((option) => option.kind === "reject_once") ?? optionMatching(options, /deny|reject/iu);
     return deny ? { outcome: "selected", optionId: deny.optionId } : { outcome: "cancelled" };
   }
 };
@@ -15177,9 +15202,9 @@ async function terminate(child, options = {}) {
   const group = options.group ?? false;
   const exited = once(child, "exit").then(() => true);
   signalChild(child, "SIGTERM", group);
-  if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)])) return;
+  if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false, { ref: false })])) return;
   signalChild(child, "SIGKILL", group);
-  await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)]);
+  await Promise.race([exited, delay(TERMINATE_GRACE_MS, false, { ref: false })]);
 }
 var KimiAcpClient = class {
   constructor(config2) {
@@ -15355,6 +15380,23 @@ ${diagnostic}` : ""}`,
   }
 };
 
+// src/heartbeat.ts
+function startHeartbeat(options) {
+  const startedAt = Date.now();
+  let active = true;
+  const timer = setInterval(() => {
+    if (!active) options.onBeat(Date.now() - startedAt);
+    active = false;
+  }, options.intervalMs);
+  timer.unref();
+  return {
+    recordActivity: () => {
+      active = true;
+    },
+    stop: () => clearInterval(timer)
+  };
+}
+
 // src/prompts.ts
 var SHARED = `
 You are operating inside an isolated copy of the user's repository.
@@ -15362,17 +15404,18 @@ Never publish, deploy, push, access credentials, or modify files outside the cur
 Do not claim that tests passed unless you actually ran them and saw a successful result.
 Return a concise but complete Markdown report with evidence, file paths, and commands executed.
 `;
-function buildPrompt(kind, userPrompt) {
+function buildPrompt(kind, userPrompt, diffIsEmpty = false) {
+  const comparison = diffIsEmpty ? "The base and current snapshots are IDENTICAL \u2014 `git diff HEAD^ HEAD` is empty, so there is no base-vs-current change set to inspect; review the full current tree with `git show HEAD` and `git ls-files`. Because there is no diff, you MUST NOT label any issue as newly introduced by these changes versus pre-existing \u2014 you cannot tell them apart here." : "The latest commit is an isolated relay baseline containing the requested comparison; inspect it with `git show HEAD` and `git diff HEAD^ HEAD` when applicable.";
   switch (kind) {
     case "review":
       return `${SHARED}
-This is a read-only code review. The latest commit is an isolated relay baseline containing the requested comparison; inspect it with \`git show HEAD\` and \`git diff HEAD^ HEAD\` when applicable. Inspect the repository state and identify correctness, security, reliability, architecture, and maintainability issues. Prioritize findings by severity. Do not change files. If no material issue is found, say so explicitly and mention remaining uncertainty.
+This is a read-only code review. ${comparison} Inspect the repository state and identify correctness, security, reliability, architecture, and maintainability issues. Prioritize findings by severity. Do not change files. If no material issue is found, say so explicitly and mention remaining uncertainty.
 
 User focus:
 ${userPrompt}`;
     case "challenge":
       return `${SHARED}
-This is an adversarial design review. The latest commit is an isolated relay baseline containing the requested comparison; inspect it with \`git show HEAD\` and \`git diff HEAD^ HEAD\` when applicable. Challenge assumptions, architecture choices, failure modes, race conditions, rollback behavior, data-loss risks, security boundaries, and simpler alternatives. Do not change files. Distinguish proven defects from hypotheses.
+This is an adversarial design review. ${comparison} Challenge assumptions, architecture choices, failure modes, race conditions, rollback behavior, data-loss risks, security boundaries, and simpler alternatives. Do not change files. Distinguish proven defects from hypotheses.
 
 User focus:
 ${userPrompt}`;
@@ -15602,29 +15645,46 @@ var WorkspaceManager = class {
       allowFailure: true,
       timeoutMs: 15e3
     });
-    if (gitProbe.exitCode === 0) {
-      return this.prepareGitWorkspace(projectDir, destination, kind, baseRef);
+    try {
+      if (gitProbe.exitCode === 0) {
+        return await this.prepareGitWorkspace(projectDir, destination, kind, baseRef);
+      }
+      const snapshot = await this.copyDirectorySnapshot(projectDir, destination);
+      return {
+        path: destination,
+        warnings: [
+          "Project is not a Git repository; patch generation is unavailable.",
+          ...snapshot.warnings
+        ],
+        diffIsEmpty: false
+      };
+    } catch (error40) {
+      await rm2(destination, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => void 0
+      );
+      throw error40;
     }
-    const snapshot = await this.copyDirectorySnapshot(projectDir, destination);
-    return {
-      path: destination,
-      warnings: [
-        "Project is not a Git repository; patch generation is unavailable.",
-        ...snapshot.warnings
-      ]
-    };
   }
   async prepareGitWorkspace(projectDir, destination, kind, baseRef) {
     const repositoryRoot = (await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd: projectDir })).stdout.trim();
-    const stagingRoot = await mkdtemp(join3(this.config.dataDir, "relay-base-"));
+    const headProbe = await runCommand("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
+      cwd: repositoryRoot,
+      allowFailure: true,
+      timeoutMs: 15e3
+    });
+    if (headProbe.exitCode !== 0) {
+      throw new RelayError("The Git repository has no commits to review.", "NO_COMMITS");
+    }
     const warnings = [];
+    const resolvedBaseRef = await this.resolveBaseRef(repositoryRoot, kind, baseRef, warnings);
+    const stagingRoot = await mkdtemp(join3(this.config.dataDir, "relay-base-"));
     try {
       await runCommand(
         "git",
         ["clone", "--local", "--no-hardlinks", "--no-tags", repositoryRoot, stagingRoot],
         { timeoutMs: 5 * 6e4 }
       );
-      await runCommand("git", ["checkout", "--detach", baseRef], {
+      await runCommand("git", ["checkout", "--detach", resolvedBaseRef], {
         cwd: stagingRoot,
         timeoutMs: 6e4
       });
@@ -15639,18 +15699,56 @@ var WorkspaceManager = class {
       warnings.push(...currentCopy.warnings.map((warning) => `Current snapshot: ${warning}`));
       await this.commitSnapshot(destination, "relay: isolated task baseline");
     } finally {
-      await rm2(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      await rm2(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => void 0
+      );
     }
+    const diffProbe = await runCommand("git", ["diff", "--quiet", "HEAD^", "HEAD"], {
+      cwd: destination,
+      allowFailure: true,
+      timeoutMs: 6e4
+    });
+    const diffIsEmpty = diffProbe.exitCode === 0;
     if (kind === "delegate") {
       warnings.push(
         "Delegate runs in a new isolated repository containing only filtered base and current snapshots. Only later Kimi changes are returned as a patch."
+      );
+    } else if (diffIsEmpty) {
+      warnings.push(
+        "baseRef resolved to the same tree as the current snapshot \u2014 there are NO changes to review. Pass an explicit baseRef (a merge-base or the PR target branch) to review actual changes; this run inspects the full current tree only."
       );
     } else {
       warnings.push(
         "Review runs in a new isolated repository containing only filtered base and current snapshots. Inspect the comparison with git diff HEAD^ HEAD."
       );
     }
-    return { path: destination, warnings };
+    return { path: destination, warnings, diffIsEmpty };
+  }
+  // An empty baseRef is the "auto" sentinel. For review/challenge, resolve it to
+  // the merge-base with the branch's upstream so "review my work" compares real
+  // changes instead of an empty HEAD..HEAD; fall back to HEAD (the empty-diff
+  // warning then fires) when no upstream is configured. Delegate always diffs
+  // against the current tree, and an explicit ref (including "HEAD") is verbatim.
+  async resolveBaseRef(repositoryRoot, kind, requested, warnings) {
+    if (requested !== "") return requested;
+    if (kind === "delegate") return "HEAD";
+    const mergeBase = await runCommand("git", ["merge-base", "HEAD", "@{upstream}"], {
+      cwd: repositoryRoot,
+      allowFailure: true,
+      timeoutMs: 15e3
+    });
+    const base = mergeBase.exitCode === 0 ? mergeBase.stdout.trim() : "";
+    if (base === "") return "HEAD";
+    const upstream = await runCommand(
+      "git",
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+      { cwd: repositoryRoot, allowFailure: true, timeoutMs: 15e3 }
+    );
+    const label = upstream.exitCode === 0 && upstream.stdout.trim() ? upstream.stdout.trim() : "the upstream branch";
+    warnings.push(
+      `No baseRef was given; auto-selected the merge-base with ${label} (${base.slice(0, 12)}) as the review base. Pass an explicit baseRef to override.`
+    );
+    return base;
   }
   async configureIdentity(destination) {
     await runCommand("git", ["config", "user.name", "Claude Kimi Relay"], { cwd: destination });
@@ -15821,6 +15919,20 @@ var WorkspaceManager = class {
 
 // src/runner.ts
 var TERMINAL = /* @__PURE__ */ new Set(["completed", "failed", "cancelled", "timed_out"]);
+var HEARTBEAT_INTERVAL_MS = 3e4;
+var MAX_EVENTS = 200;
+function capEvents(events) {
+  if (events.length <= MAX_EVENTS) return events;
+  const first = events[0];
+  if (first === void 0) return events;
+  const tailStart = events.length - (MAX_EVENTS - 1);
+  const marker = {
+    at: first.at,
+    status: first.status,
+    message: `[${tailStart} earlier events truncated]`
+  };
+  return [marker, ...events.slice(tailStart)];
+}
 function now() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -15841,7 +15953,7 @@ var TaskRunner = class {
         ...current,
         status,
         updatedAt: at,
-        events: [...current.events, { at, status, message }]
+        events: capEvents([...current.events, { at, status, message }])
       };
     });
   }
@@ -15851,6 +15963,11 @@ var TaskRunner = class {
     let preparedPath;
     let keepWorkspace = record2.keepWorkspace;
     try {
+      record2 = await this.store.update(
+        id,
+        (current) => TERMINAL.has(current.status) ? current : { ...current, ownerPid: process.pid, updatedAt: now() }
+      );
+      if (TERMINAL.has(record2.status)) return record2;
       record2 = await this.transition(
         id,
         "preparing_workspace",
@@ -15874,19 +15991,48 @@ var TaskRunner = class {
       if (TERMINAL.has(record2.status)) return record2;
       record2 = await this.transition(id, "running", "Kimi is working in the isolated workspace.");
       if (TERMINAL.has(record2.status)) return record2;
-      const agentResult = await this.kimi.run(
-        {
-          taskId: id,
-          kind: record2.kind,
-          prompt: buildPrompt(record2.kind, record2.prompt),
-          workspaceDir: prepared.path,
-          timeoutMs: record2.timeoutMs
-        },
-        async (message) => {
-          await this.transition(id, "running", message);
-        },
-        signal
-      );
+      let progressCount = 0;
+      const heartbeat = startHeartbeat({
+        intervalMs: HEARTBEAT_INTERVAL_MS,
+        onBeat: (elapsedMs) => {
+          void this.store.update(id, (current) => {
+            if (current.status !== "running") return current;
+            const at = now();
+            return {
+              ...current,
+              updatedAt: at,
+              events: capEvents([
+                ...current.events,
+                {
+                  at,
+                  status: "running",
+                  message: `Still analyzing \u2014 ${progressCount} update${progressCount === 1 ? "" : "s"} so far, ${Math.round(elapsedMs / 1e3)}s elapsed.`
+                }
+              ])
+            };
+          }).catch(() => void 0);
+        }
+      });
+      let agentResult;
+      try {
+        agentResult = await this.kimi.run(
+          {
+            taskId: id,
+            kind: record2.kind,
+            prompt: buildPrompt(record2.kind, record2.prompt, prepared.diffIsEmpty),
+            workspaceDir: prepared.path,
+            timeoutMs: record2.timeoutMs
+          },
+          async (message) => {
+            progressCount += 1;
+            heartbeat.recordActivity();
+            await this.transition(id, "running", message);
+          },
+          signal
+        );
+      } finally {
+        heartbeat.stop();
+      }
       record2 = await this.transition(
         id,
         "validating",
@@ -15910,10 +16056,10 @@ var TaskRunner = class {
             ...record2.keepWorkspace ? { workspacePath: prepared.path } : {},
             warnings: [...prepared.warnings, ...agentResult.warnings]
           },
-          events: [
+          events: capEvents([
             ...current.events,
             { at: completedAt, status: "completed", message: "Task completed." }
-          ]
+          ])
         };
       });
       return completed;
@@ -15928,7 +16074,10 @@ var TaskRunner = class {
           status,
           updatedAt: failedAt,
           error: toErrorMessage(error40),
-          events: [...current.events, { at: failedAt, status, message: toErrorMessage(error40) }]
+          events: capEvents([
+            ...current.events,
+            { at: failedAt, status, message: toErrorMessage(error40) }
+          ])
         }
       );
       return failed;

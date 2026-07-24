@@ -105,6 +105,8 @@ In Claude Code:
 /kimi-relay:cancel <task-id>
 ```
 
+For `review` and `challenge`, the base ref decides what "the changes" means. Pass an explicit `--base` (the PR target branch, or a merge-base) to review a real change set. With no `--base`, the relay auto-selects the merge-base with your branch's upstream; if there is no upstream it falls back to the current tree, warns that there are no changes to review, and inspects the whole tree instead. `delegate` always builds its patch against the current tree, so it ignores the base ref.
+
 From the CLI, a review that blocks until it finishes:
 
 ```bash

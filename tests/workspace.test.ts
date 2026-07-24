@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 import test from "node:test";
 
+import { stat } from "node:fs/promises";
+
 import { runCommand } from "../src/process.js";
 import { WorkspaceManager } from "../src/workspace.js";
 import type { RelayConfig } from "../src/types.js";
@@ -137,4 +139,172 @@ void test("an absolute in-repo symlink is rewritten to stay inside the workspace
   const resolved = await realpath(copied);
   assert.ok(resolved.startsWith(`${await realpath(prepared.path)}${sep}`));
   assert.equal(await readFile(copied, "utf8"), "hello\n");
+});
+
+void test("review with baseRef HEAD on a clean tree flags an empty base↔current diff without the misleading hint", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-empty-repo-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-empty-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  await writeFile(join(root, "app.txt"), "committed\n");
+  await runCommand("git", ["add", "-A"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "initial"], { cwd: root });
+
+  // Clean tree + baseRef HEAD => base and current snapshots are identical.
+  const manager = new WorkspaceManager(config(dataDir));
+  const prepared = await manager.prepare("task-empty", root, "review", "HEAD");
+
+  assert.equal(prepared.diffIsEmpty, true);
+  assert.ok(
+    prepared.warnings.some((warning) => /no changes to review/iu.test(warning)),
+    `expected a loud empty-diff warning, got ${JSON.stringify(prepared.warnings)}`,
+  );
+  assert.ok(
+    !prepared.warnings.some((warning) => warning.includes("git diff HEAD^ HEAD")),
+    "the misleading 'git diff HEAD^ HEAD' hint must be dropped when the diff is empty",
+  );
+});
+
+void test("review with uncommitted changes reports a non-empty diff and keeps the standard hint", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-nonempty-repo-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-nonempty-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  await writeFile(join(root, "app.txt"), "committed\n");
+  await runCommand("git", ["add", "-A"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "initial"], { cwd: root });
+  await writeFile(join(root, "app.txt"), "uncommitted change\n");
+
+  const manager = new WorkspaceManager(config(dataDir));
+  const prepared = await manager.prepare("task-nonempty", root, "review", "HEAD");
+
+  assert.equal(prepared.diffIsEmpty, false);
+  assert.ok(
+    prepared.warnings.some((warning) => warning.includes("git diff HEAD^ HEAD")),
+    "a real diff must keep the standard comparison hint",
+  );
+});
+
+void test("review with no explicit baseRef diffs against the upstream merge-base", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-upstream-repo-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-upstream-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init", "-b", "work"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  await writeFile(join(root, "base.txt"), "base\n");
+  await runCommand("git", ["add", "-A"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "base"], { cwd: root });
+  // Point work's upstream at this fork commit, then advance one commit past it.
+  await runCommand("git", ["branch", "upstream-branch"], { cwd: root });
+  await runCommand("git", ["config", "branch.work.remote", "."], { cwd: root });
+  await runCommand("git", ["config", "branch.work.merge", "refs/heads/upstream-branch"], {
+    cwd: root,
+  });
+  await writeFile(join(root, "feature.txt"), "feature\n");
+  await runCommand("git", ["add", "-A"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "feature ahead of upstream"], { cwd: root });
+
+  // Empty baseRef ("") means "auto": resolve to the upstream merge-base.
+  const manager = new WorkspaceManager(config(dataDir));
+  const prepared = await manager.prepare("task-auto", root, "review", "");
+
+  assert.equal(prepared.diffIsEmpty, false);
+  assert.ok(
+    prepared.warnings.some((warning) => /auto-selected/iu.test(warning)),
+    `expected an auto-selected base warning, got ${JSON.stringify(prepared.warnings)}`,
+  );
+});
+
+void test("review with no explicit baseRef and no upstream falls back to HEAD", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-noupstream-repo-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-noupstream-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init", "-b", "work"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  await writeFile(join(root, "base.txt"), "base\n");
+  await runCommand("git", ["add", "-A"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "base"], { cwd: root });
+
+  const manager = new WorkspaceManager(config(dataDir));
+  const prepared = await manager.prepare("task-noupstream", root, "review", "");
+
+  assert.equal(prepared.diffIsEmpty, true);
+  assert.ok(prepared.warnings.some((warning) => /no changes to review/iu.test(warning)));
+  assert.ok(!prepared.warnings.some((warning) => /auto-selected/iu.test(warning)));
+});
+
+void test("reviewing a Git repo with no commits fails with a clear message", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-nocommit-repo-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-nocommit-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init", "-b", "work"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+
+  const manager = new WorkspaceManager(config(dataDir));
+  await assert.rejects(() => manager.prepare("task-nocommit", root, "review", ""), /no commits/iu);
+});
+
+void test("a failed prepare leaves no workspace directory behind", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-leak-repo-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-leak-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  await writeFile(join(root, "big.txt"), "x".repeat(5000));
+  await runCommand("git", ["add", "-A"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "big"], { cwd: root });
+
+  // A tiny workspace cap forces WORKSPACE_TOO_LARGE after the destination dir
+  // has already been created, exercising the prepare-failure cleanup path.
+  const tiny: RelayConfig = { ...config(dataDir), maxWorkspaceBytes: 100 };
+  const manager = new WorkspaceManager(tiny);
+  await assert.rejects(
+    () => manager.prepare("task-leak", root, "review", "HEAD"),
+    /copy limit|too large/iu,
+  );
+  await assert.rejects(() => stat(join(dataDir, "workspaces", "task-leak")), /ENOENT/u);
 });

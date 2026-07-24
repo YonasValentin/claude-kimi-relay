@@ -33,6 +33,9 @@ const COPY_EXCLUDES = new Set([
 export interface PreparedWorkspace {
   readonly path: string;
   readonly warnings: readonly string[];
+  // True when the isolated base and current snapshots resolve to the same tree,
+  // so `git diff HEAD^ HEAD` is empty. Only meaningful for git-backed reviews.
+  readonly diffIsEmpty: boolean;
 }
 
 interface CopyResult {
@@ -82,18 +85,29 @@ export class WorkspaceManager {
       timeoutMs: 15_000,
     });
 
-    if (gitProbe.exitCode === 0) {
-      return this.prepareGitWorkspace(projectDir, destination, kind, baseRef);
-    }
+    // Any failure after the destination dir is created would otherwise strand a
+    // partially-populated workspaces/<taskId> dir (the runner's cleanup only
+    // fires once prepare() has returned a path). Clean it on the way out.
+    try {
+      if (gitProbe.exitCode === 0) {
+        return await this.prepareGitWorkspace(projectDir, destination, kind, baseRef);
+      }
 
-    const snapshot = await this.copyDirectorySnapshot(projectDir, destination);
-    return {
-      path: destination,
-      warnings: [
-        "Project is not a Git repository; patch generation is unavailable.",
-        ...snapshot.warnings,
-      ],
-    };
+      const snapshot = await this.copyDirectorySnapshot(projectDir, destination);
+      return {
+        path: destination,
+        warnings: [
+          "Project is not a Git repository; patch generation is unavailable.",
+          ...snapshot.warnings,
+        ],
+        diffIsEmpty: false,
+      };
+    } catch (error) {
+      await rm(destination, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => undefined,
+      );
+      throw error;
+    }
   }
 
   private async prepareGitWorkspace(
@@ -105,8 +119,23 @@ export class WorkspaceManager {
     const repositoryRoot = (
       await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd: projectDir })
     ).stdout.trim();
-    const stagingRoot = await mkdtemp(join(this.config.dataDir, "relay-base-"));
+
+    // A repo with no commits has an unborn HEAD; the snapshot checkout would
+    // fail with an opaque git error. Fail fast with a purposeful message.
+    const headProbe = await runCommand("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
+      cwd: repositoryRoot,
+      allowFailure: true,
+      timeoutMs: 15_000,
+    });
+    if (headProbe.exitCode !== 0) {
+      throw new RelayError("The Git repository has no commits to review.", "NO_COMMITS");
+    }
+
+    // resolveBaseRef only needs the source repo; run it (and fail) before the
+    // staging dir exists so a throw here cannot leak a relay-base-* temp dir.
     const warnings: string[] = [];
+    const resolvedBaseRef = await this.resolveBaseRef(repositoryRoot, kind, baseRef, warnings);
+    const stagingRoot = await mkdtemp(join(this.config.dataDir, "relay-base-"));
 
     try {
       await runCommand(
@@ -114,7 +143,7 @@ export class WorkspaceManager {
         ["clone", "--local", "--no-hardlinks", "--no-tags", repositoryRoot, stagingRoot],
         { timeoutMs: 5 * 60_000 },
       );
-      await runCommand("git", ["checkout", "--detach", baseRef], {
+      await runCommand("git", ["checkout", "--detach", resolvedBaseRef], {
         cwd: stagingRoot,
         timeoutMs: 60_000,
       });
@@ -132,12 +161,29 @@ export class WorkspaceManager {
       warnings.push(...currentCopy.warnings.map((warning) => `Current snapshot: ${warning}`));
       await this.commitSnapshot(destination, "relay: isolated task baseline");
     } finally {
-      await rm(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      // Swallow a cleanup failure so it cannot mask the original error.
+      await rm(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => undefined,
+      );
     }
+
+    // Both snapshots are always committed (--allow-empty), so HEAD^ exists.
+    // Exit 0 means the trees match: baseRef resolved to the current state and
+    // there is nothing to compare.
+    const diffProbe = await runCommand("git", ["diff", "--quiet", "HEAD^", "HEAD"], {
+      cwd: destination,
+      allowFailure: true,
+      timeoutMs: 60_000,
+    });
+    const diffIsEmpty = diffProbe.exitCode === 0;
 
     if (kind === "delegate") {
       warnings.push(
         "Delegate runs in a new isolated repository containing only filtered base and current snapshots. Only later Kimi changes are returned as a patch.",
+      );
+    } else if (diffIsEmpty) {
+      warnings.push(
+        "baseRef resolved to the same tree as the current snapshot — there are NO changes to review. Pass an explicit baseRef (a merge-base or the PR target branch) to review actual changes; this run inspects the full current tree only.",
       );
     } else {
       warnings.push(
@@ -145,7 +191,44 @@ export class WorkspaceManager {
       );
     }
 
-    return { path: destination, warnings };
+    return { path: destination, warnings, diffIsEmpty };
+  }
+
+  // An empty baseRef is the "auto" sentinel. For review/challenge, resolve it to
+  // the merge-base with the branch's upstream so "review my work" compares real
+  // changes instead of an empty HEAD..HEAD; fall back to HEAD (the empty-diff
+  // warning then fires) when no upstream is configured. Delegate always diffs
+  // against the current tree, and an explicit ref (including "HEAD") is verbatim.
+  private async resolveBaseRef(
+    repositoryRoot: string,
+    kind: TaskKind,
+    requested: string,
+    warnings: string[],
+  ): Promise<string> {
+    if (requested !== "") return requested;
+    if (kind === "delegate") return "HEAD";
+
+    const mergeBase = await runCommand("git", ["merge-base", "HEAD", "@{upstream}"], {
+      cwd: repositoryRoot,
+      allowFailure: true,
+      timeoutMs: 15_000,
+    });
+    const base = mergeBase.exitCode === 0 ? mergeBase.stdout.trim() : "";
+    if (base === "") return "HEAD";
+
+    const upstream = await runCommand(
+      "git",
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+      { cwd: repositoryRoot, allowFailure: true, timeoutMs: 15_000 },
+    );
+    const label =
+      upstream.exitCode === 0 && upstream.stdout.trim()
+        ? upstream.stdout.trim()
+        : "the upstream branch";
+    warnings.push(
+      `No baseRef was given; auto-selected the merge-base with ${label} (${base.slice(0, 12)}) as the review base. Pass an explicit baseRef to override.`,
+    );
+    return base;
   }
 
   private async configureIdentity(destination: string): Promise<void> {

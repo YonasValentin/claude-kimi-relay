@@ -94,3 +94,61 @@ void test("delegate still allows a normal in-workspace edit", () => {
   );
   assert.deepEqual(result, { outcome: "selected", optionId: "allow" });
 });
+
+void test("never selects a session-wide allow_always option, even when listed first", () => {
+  // A conforming agent records allow_always as a persistent grant and stops
+  // re-requesting, which would bypass the deny gate for the rest of the session.
+  const withAlways = [
+    { optionId: "always", kind: "allow_always", name: "Allow always" },
+    { optionId: "once", kind: "allow_once", name: "Allow once" },
+    { optionId: "deny", kind: "reject_once", name: "Reject" },
+  ] as const;
+  const result = policy.decide(
+    { toolCall: { title: "Read file src/index.ts" }, options: withAlways },
+    { mode: "review", workspaceDir: "/tmp/workspace" },
+  );
+  assert.deepEqual(result, { outcome: "selected", optionId: "once" });
+});
+
+void test("refuses to allow when only a session-wide allow_always is offered", () => {
+  const onlyAlways = [
+    { optionId: "always", kind: "allow_always", name: "Allow always" },
+    { optionId: "deny", kind: "reject_once", name: "Reject" },
+  ] as const;
+  const result = policy.decide(
+    { toolCall: { title: "Read file src/index.ts" }, options: onlyAlways },
+    { mode: "review", workspaceDir: "/tmp/workspace" },
+  );
+  assert.notDeepEqual(result, { outcome: "selected", optionId: "always" });
+});
+
+void test("review denies a safe-read verb that chains or redirects a write", () => {
+  for (const command of [
+    "cat template.txt && echo pwned > ~/.bashrc",
+    "grep -r x . | tee ./out.txt",
+    "cat notes.md; rm important.txt",
+  ]) {
+    const result = policy.decide(
+      { toolCall: { title: "Run command", rawInput: { command } }, options },
+      { mode: "review", workspaceDir: "/tmp/workspace" },
+    );
+    assert.deepEqual(result, { outcome: "selected", optionId: "deny" }, command);
+  }
+});
+
+void test("review denies safe-read verbs that write via flags, binaries, or non-obvious separators", () => {
+  for (const command of [
+    "find . -maxdepth 1 -fprint /home/user/pwned.txt", // find write-action
+    "find . -type f -exec rm {} ;", // find -exec
+    "cat notes.md\nrm -f important.txt", // newline separator + rm binary
+    "cat a.txt & rm b.txt", // bare & separator
+    "cat x.txt; cp x.txt /home/user/evil", // cp binary
+    "ls . && tee /home/user/out", // tee binary
+  ]) {
+    const result = policy.decide(
+      { toolCall: { title: "Run command", rawInput: { command } }, options },
+      { mode: "review", workspaceDir: "/tmp/workspace" },
+    );
+    assert.deepEqual(result, { outcome: "selected", optionId: "deny" }, JSON.stringify(command));
+  }
+});
