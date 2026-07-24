@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-24
+
 ### Security
 
 - Permission broker no longer selects a session-wide `allow_always` ACP option: it prefers the one-shot allow (and refuses to allow when only an `always` option is offered), and symmetrically prefers `reject_once`. A conforming agent records `allow_always` as a persistent grant and stops re-requesting, so selecting it after one benign call would have bypassed the deny-first gate for the rest of the session.

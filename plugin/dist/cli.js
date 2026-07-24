@@ -15255,7 +15255,7 @@ var PermissionPolicy = class {
 init_process();
 
 // src/version.ts
-var VERSION = "0.1.2";
+var VERSION = "0.2.0";
 
 // src/acp-client.ts
 function extractText(update) {

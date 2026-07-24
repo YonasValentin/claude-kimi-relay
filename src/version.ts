@@ -3,4 +3,4 @@
 // (and asserted by scripts/check-release.mjs). A build-time constant rather
 // than a runtime package.json read, because the esbuild plugin bundle ships
 // next to a `{"type":"module"}` stub with no version field.
-export const VERSION = "0.1.2";
+export const VERSION = "0.2.0";
