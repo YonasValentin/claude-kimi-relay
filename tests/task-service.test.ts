@@ -44,3 +44,21 @@ void test("a background worker that fails to spawn marks the task failed instead
   assert.equal(latest.status, "failed");
   assert.match(latest.error ?? "", /background worker/iu);
 });
+
+void test("a review with no explicit baseRef records the auto sentinel", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-baseref-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const service = new TaskService(config(dataDir));
+
+  const record = await service.start({
+    kind: "review",
+    prompt: "review the current changes",
+    projectDir: join(dataDir, "does-not-exist"),
+    background: true,
+    keepWorkspace: false,
+  });
+
+  // Empty baseRef is the "auto" sentinel resolved later in the workspace; it is
+  // not coerced to "HEAD" at request time for read-only kinds.
+  assert.equal(record.baseRef, "");
+});

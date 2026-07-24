@@ -31,7 +31,10 @@ function validateRequest(request: TaskRequest, config: RelayConfig): ValidatedTa
   }
 
   const trimmedBaseRef = request.baseRef?.trim();
-  const baseRef = trimmedBaseRef === undefined || trimmedBaseRef === "" ? "HEAD" : trimmedBaseRef;
+  // Empty is the "auto" sentinel: the workspace resolves it to the upstream
+  // merge-base for review/challenge, or the current tree for delegate. An
+  // explicit ref (including "HEAD") is kept verbatim.
+  const baseRef = trimmedBaseRef ?? "";
   if (baseRef.startsWith("-") || /[\0\r\n]/u.test(baseRef)) {
     throw new RelayError("baseRef is not a safe Git revision.", "INVALID_BASE_REF");
   }

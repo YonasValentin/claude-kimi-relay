@@ -15444,6 +15444,23 @@ ${diagnostic}` : ""}`,
 // src/runner.ts
 init_errors();
 
+// src/heartbeat.ts
+function startHeartbeat(options) {
+  const startedAt = Date.now();
+  let active = true;
+  const timer = setInterval(() => {
+    if (!active) options.onBeat(Date.now() - startedAt);
+    active = false;
+  }, options.intervalMs);
+  timer.unref();
+  return {
+    recordActivity: () => {
+      active = true;
+    },
+    stop: () => clearInterval(timer)
+  };
+}
+
 // src/prompts.ts
 var SHARED = `
 You are operating inside an isolated copy of the user's repository.
@@ -15451,17 +15468,18 @@ Never publish, deploy, push, access credentials, or modify files outside the cur
 Do not claim that tests passed unless you actually ran them and saw a successful result.
 Return a concise but complete Markdown report with evidence, file paths, and commands executed.
 `;
-function buildPrompt(kind, userPrompt) {
+function buildPrompt(kind, userPrompt, diffIsEmpty = false) {
+  const comparison = diffIsEmpty ? "The base and current snapshots are IDENTICAL \u2014 `git diff HEAD^ HEAD` is empty, so there is no base-vs-current change set to inspect; review the full current tree with `git show HEAD` and `git ls-files`. Because there is no diff, you MUST NOT label any issue as newly introduced by these changes versus pre-existing \u2014 you cannot tell them apart here." : "The latest commit is an isolated relay baseline containing the requested comparison; inspect it with `git show HEAD` and `git diff HEAD^ HEAD` when applicable.";
   switch (kind) {
     case "review":
       return `${SHARED}
-This is a read-only code review. The latest commit is an isolated relay baseline containing the requested comparison; inspect it with \`git show HEAD\` and \`git diff HEAD^ HEAD\` when applicable. Inspect the repository state and identify correctness, security, reliability, architecture, and maintainability issues. Prioritize findings by severity. Do not change files. If no material issue is found, say so explicitly and mention remaining uncertainty.
+This is a read-only code review. ${comparison} Inspect the repository state and identify correctness, security, reliability, architecture, and maintainability issues. Prioritize findings by severity. Do not change files. If no material issue is found, say so explicitly and mention remaining uncertainty.
 
 User focus:
 ${userPrompt}`;
     case "challenge":
       return `${SHARED}
-This is an adversarial design review. The latest commit is an isolated relay baseline containing the requested comparison; inspect it with \`git show HEAD\` and \`git diff HEAD^ HEAD\` when applicable. Challenge assumptions, architecture choices, failure modes, race conditions, rollback behavior, data-loss risks, security boundaries, and simpler alternatives. Do not change files. Distinguish proven defects from hypotheses.
+This is an adversarial design review. ${comparison} Challenge assumptions, architecture choices, failure modes, race conditions, rollback behavior, data-loss risks, security boundaries, and simpler alternatives. Do not change files. Distinguish proven defects from hypotheses.
 
 User focus:
 ${userPrompt}`;
@@ -15703,20 +15721,22 @@ var WorkspaceManager = class {
       warnings: [
         "Project is not a Git repository; patch generation is unavailable.",
         ...snapshot.warnings
-      ]
+      ],
+      diffIsEmpty: false
     };
   }
   async prepareGitWorkspace(projectDir, destination, kind, baseRef) {
     const repositoryRoot = (await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd: projectDir })).stdout.trim();
     const stagingRoot = await mkdtemp(join4(this.config.dataDir, "relay-base-"));
     const warnings = [];
+    const resolvedBaseRef = await this.resolveBaseRef(repositoryRoot, kind, baseRef, warnings);
     try {
       await runCommand(
         "git",
         ["clone", "--local", "--no-hardlinks", "--no-tags", repositoryRoot, stagingRoot],
         { timeoutMs: 5 * 6e4 }
       );
-      await runCommand("git", ["checkout", "--detach", baseRef], {
+      await runCommand("git", ["checkout", "--detach", resolvedBaseRef], {
         cwd: stagingRoot,
         timeoutMs: 6e4
       });
@@ -15733,16 +15753,52 @@ var WorkspaceManager = class {
     } finally {
       await rm3(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
     }
+    const diffProbe = await runCommand("git", ["diff", "--quiet", "HEAD^", "HEAD"], {
+      cwd: destination,
+      allowFailure: true,
+      timeoutMs: 6e4
+    });
+    const diffIsEmpty = diffProbe.exitCode === 0;
     if (kind === "delegate") {
       warnings.push(
         "Delegate runs in a new isolated repository containing only filtered base and current snapshots. Only later Kimi changes are returned as a patch."
+      );
+    } else if (diffIsEmpty) {
+      warnings.push(
+        "baseRef resolved to the same tree as the current snapshot \u2014 there are NO changes to review. Pass an explicit baseRef (a merge-base or the PR target branch) to review actual changes; this run inspects the full current tree only."
       );
     } else {
       warnings.push(
         "Review runs in a new isolated repository containing only filtered base and current snapshots. Inspect the comparison with git diff HEAD^ HEAD."
       );
     }
-    return { path: destination, warnings };
+    return { path: destination, warnings, diffIsEmpty };
+  }
+  // An empty baseRef is the "auto" sentinel. For review/challenge, resolve it to
+  // the merge-base with the branch's upstream so "review my work" compares real
+  // changes instead of an empty HEAD..HEAD; fall back to HEAD (the empty-diff
+  // warning then fires) when no upstream is configured. Delegate always diffs
+  // against the current tree, and an explicit ref (including "HEAD") is verbatim.
+  async resolveBaseRef(repositoryRoot, kind, requested, warnings) {
+    if (requested !== "") return requested;
+    if (kind === "delegate") return "HEAD";
+    const mergeBase = await runCommand("git", ["merge-base", "HEAD", "@{upstream}"], {
+      cwd: repositoryRoot,
+      allowFailure: true,
+      timeoutMs: 15e3
+    });
+    const base = mergeBase.exitCode === 0 ? mergeBase.stdout.trim() : "";
+    if (base === "") return "HEAD";
+    const upstream = await runCommand(
+      "git",
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+      { cwd: repositoryRoot, allowFailure: true, timeoutMs: 15e3 }
+    );
+    const label = upstream.exitCode === 0 && upstream.stdout.trim() ? upstream.stdout.trim() : "the upstream branch";
+    warnings.push(
+      `No baseRef was given; auto-selected the merge-base with ${label} (${base.slice(0, 12)}) as the review base. Pass an explicit baseRef to override.`
+    );
+    return base;
   }
   async configureIdentity(destination) {
     await runCommand("git", ["config", "user.name", "Claude Kimi Relay"], { cwd: destination });
@@ -15913,6 +15969,7 @@ var WorkspaceManager = class {
 
 // src/runner.ts
 var TERMINAL = /* @__PURE__ */ new Set(["completed", "failed", "cancelled", "timed_out"]);
+var HEARTBEAT_INTERVAL_MS = 3e4;
 function now() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -15966,19 +16023,37 @@ var TaskRunner = class {
       if (TERMINAL.has(record2.status)) return record2;
       record2 = await this.transition(id, "running", "Kimi is working in the isolated workspace.");
       if (TERMINAL.has(record2.status)) return record2;
-      const agentResult = await this.kimi.run(
-        {
-          taskId: id,
-          kind: record2.kind,
-          prompt: buildPrompt(record2.kind, record2.prompt),
-          workspaceDir: prepared.path,
-          timeoutMs: record2.timeoutMs
-        },
-        async (message) => {
-          await this.transition(id, "running", message);
-        },
-        signal
-      );
+      let progressCount = 0;
+      const heartbeat = startHeartbeat({
+        intervalMs: HEARTBEAT_INTERVAL_MS,
+        onBeat: (elapsedMs) => {
+          void this.transition(
+            id,
+            "running",
+            `Still analyzing \u2014 ${progressCount} update${progressCount === 1 ? "" : "s"} so far, ${Math.round(elapsedMs / 1e3)}s elapsed.`
+          ).catch(() => void 0);
+        }
+      });
+      let agentResult;
+      try {
+        agentResult = await this.kimi.run(
+          {
+            taskId: id,
+            kind: record2.kind,
+            prompt: buildPrompt(record2.kind, record2.prompt, prepared.diffIsEmpty),
+            workspaceDir: prepared.path,
+            timeoutMs: record2.timeoutMs
+          },
+          async (message) => {
+            progressCount += 1;
+            heartbeat.recordActivity();
+            await this.transition(id, "running", message);
+          },
+          signal
+        );
+      } finally {
+        heartbeat.stop();
+      }
       record2 = await this.transition(
         id,
         "validating",
@@ -16044,7 +16119,7 @@ function validateRequest(request, config2) {
     throw new RelayError("Unknown task kind.", "INVALID_TASK_KIND");
   }
   const trimmedBaseRef = request.baseRef?.trim();
-  const baseRef = trimmedBaseRef === void 0 || trimmedBaseRef === "" ? "HEAD" : trimmedBaseRef;
+  const baseRef = trimmedBaseRef ?? "";
   if (baseRef.startsWith("-") || /[\0\r\n]/u.test(baseRef)) {
     throw new RelayError("baseRef is not a safe Git revision.", "INVALID_BASE_REF");
   }

@@ -4,6 +4,15 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+### Added
+
+- `review`/`challenge` started without an explicit `baseRef` now auto-select the merge-base with the branch's upstream, so "review my work" compares real changes instead of an empty `HEAD..HEAD`. The auto-selected base is reported in a warning and is never silent; with no upstream configured it falls back to the current tree (and the empty-diff warning fires). Pass an explicit `baseRef` to override. `delegate` still diffs against the current tree.
+- Long-running tasks emit a periodic liveness event ("Still analyzing — N updates so far, Ms elapsed") whenever Kimi goes a while with no progress update, so a `get_task` poller can tell a slow-but-working run apart from a hung one. The heartbeat only fires during silent gaps and never while real progress is already flowing.
+
+### Fixed
+
+- `review`/`challenge` no longer silently degrade to a whole-tree read while still instructing the reviewer to run `git diff HEAD^ HEAD`. When `baseRef` resolves to the same tree as the current snapshot (the default `HEAD` on a clean checkout), the isolated base and current commits are identical and that diff is empty. The relay now detects the empty diff, replaces the misleading comparison hint with a loud "no changes to review — pass an explicit baseRef" warning, and tells Kimi plainly that the snapshots are identical so it must not attribute any finding as newly introduced versus pre-existing. `delegate` is unaffected (an empty base diff is legitimate there).
+
 ## [0.1.0] - 2026-07-23
 
 ### Added

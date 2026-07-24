@@ -1,11 +1,17 @@
-import type { RelayConfig, TaskRecord, TaskStatus } from "./types.js";
+import type { AgentRunResult, RelayConfig, TaskRecord, TaskStatus } from "./types.js";
 import { KimiAcpClient } from "./acp-client.js";
 import { RelayError, toErrorMessage } from "./errors.js";
+import { startHeartbeat } from "./heartbeat.js";
 import { buildPrompt } from "./prompts.js";
 import { TaskStore } from "./store.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const TERMINAL = new Set<TaskStatus>(["completed", "failed", "cancelled", "timed_out"]);
+
+// While Kimi is running, emit a liveness event whenever this long without any
+// progress update, so a poller can distinguish a slow-but-working run from a
+// hung one.
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 function now(): string {
   return new Date().toISOString();
@@ -68,19 +74,37 @@ export class TaskRunner {
       record = await this.transition(id, "running", "Kimi is working in the isolated workspace.");
       if (TERMINAL.has(record.status)) return record;
 
-      const agentResult = await this.kimi.run(
-        {
-          taskId: id,
-          kind: record.kind,
-          prompt: buildPrompt(record.kind, record.prompt),
-          workspaceDir: prepared.path,
-          timeoutMs: record.timeoutMs,
+      let progressCount = 0;
+      const heartbeat = startHeartbeat({
+        intervalMs: HEARTBEAT_INTERVAL_MS,
+        onBeat: (elapsedMs) => {
+          void this.transition(
+            id,
+            "running",
+            `Still analyzing — ${progressCount} update${progressCount === 1 ? "" : "s"} so far, ${Math.round(elapsedMs / 1000)}s elapsed.`,
+          ).catch(() => undefined);
         },
-        async (message) => {
-          await this.transition(id, "running", message);
-        },
-        signal,
-      );
+      });
+      let agentResult: AgentRunResult;
+      try {
+        agentResult = await this.kimi.run(
+          {
+            taskId: id,
+            kind: record.kind,
+            prompt: buildPrompt(record.kind, record.prompt, prepared.diffIsEmpty),
+            workspaceDir: prepared.path,
+            timeoutMs: record.timeoutMs,
+          },
+          async (message) => {
+            progressCount += 1;
+            heartbeat.recordActivity();
+            await this.transition(id, "running", message);
+          },
+          signal,
+        );
+      } finally {
+        heartbeat.stop();
+      }
 
       record = await this.transition(
         id,
