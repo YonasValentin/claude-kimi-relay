@@ -85,19 +85,29 @@ export class WorkspaceManager {
       timeoutMs: 15_000,
     });
 
-    if (gitProbe.exitCode === 0) {
-      return this.prepareGitWorkspace(projectDir, destination, kind, baseRef);
-    }
+    // Any failure after the destination dir is created would otherwise strand a
+    // partially-populated workspaces/<taskId> dir (the runner's cleanup only
+    // fires once prepare() has returned a path). Clean it on the way out.
+    try {
+      if (gitProbe.exitCode === 0) {
+        return await this.prepareGitWorkspace(projectDir, destination, kind, baseRef);
+      }
 
-    const snapshot = await this.copyDirectorySnapshot(projectDir, destination);
-    return {
-      path: destination,
-      warnings: [
-        "Project is not a Git repository; patch generation is unavailable.",
-        ...snapshot.warnings,
-      ],
-      diffIsEmpty: false,
-    };
+      const snapshot = await this.copyDirectorySnapshot(projectDir, destination);
+      return {
+        path: destination,
+        warnings: [
+          "Project is not a Git repository; patch generation is unavailable.",
+          ...snapshot.warnings,
+        ],
+        diffIsEmpty: false,
+      };
+    } catch (error) {
+      await rm(destination, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => undefined,
+      );
+      throw error;
+    }
   }
 
   private async prepareGitWorkspace(
@@ -109,9 +119,23 @@ export class WorkspaceManager {
     const repositoryRoot = (
       await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd: projectDir })
     ).stdout.trim();
-    const stagingRoot = await mkdtemp(join(this.config.dataDir, "relay-base-"));
+
+    // A repo with no commits has an unborn HEAD; the snapshot checkout would
+    // fail with an opaque git error. Fail fast with a purposeful message.
+    const headProbe = await runCommand("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
+      cwd: repositoryRoot,
+      allowFailure: true,
+      timeoutMs: 15_000,
+    });
+    if (headProbe.exitCode !== 0) {
+      throw new RelayError("The Git repository has no commits to review.", "NO_COMMITS");
+    }
+
+    // resolveBaseRef only needs the source repo; run it (and fail) before the
+    // staging dir exists so a throw here cannot leak a relay-base-* temp dir.
     const warnings: string[] = [];
     const resolvedBaseRef = await this.resolveBaseRef(repositoryRoot, kind, baseRef, warnings);
+    const stagingRoot = await mkdtemp(join(this.config.dataDir, "relay-base-"));
 
     try {
       await runCommand(

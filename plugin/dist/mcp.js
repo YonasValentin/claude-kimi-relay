@@ -27761,6 +27761,12 @@ function positiveInteger(value, fallback) {
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
+function boundedInteger(value, fallback, min, max) {
+  const parsed = positiveInteger(value, fallback);
+  return parsed < min || parsed > max ? fallback : parsed;
+}
+var MIN_TIMEOUT_MS = 1e4;
+var MAX_TIMEOUT_MS = 24 * 60 * 60 * 1e3;
 function loadConfig(env = process.env) {
   const dataDir = resolve(
     env.CLAUDE_KIMI_RELAY_DATA_DIR ?? env.CLAUDE_PLUGIN_DATA ?? join(homedir(), ".claude-kimi-relay")
@@ -27770,7 +27776,12 @@ function loadConfig(env = process.env) {
     dataDir,
     ...env.CLAUDE_PROJECT_DIR?.trim() ? { projectDir: resolve(env.CLAUDE_PROJECT_DIR) } : {},
     kimiCliPath: kimiCliPath === void 0 || kimiCliPath === "" ? "kimi" : kimiCliPath,
-    defaultTimeoutMs: positiveInteger(env.CLAUDE_KIMI_RELAY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    defaultTimeoutMs: boundedInteger(
+      env.CLAUDE_KIMI_RELAY_TIMEOUT_MS,
+      DEFAULT_TIMEOUT_MS,
+      MIN_TIMEOUT_MS,
+      MAX_TIMEOUT_MS
+    ),
     maxFileBytes: positiveInteger(env.CLAUDE_KIMI_RELAY_MAX_FILE_BYTES, DEFAULT_MAX_FILE_BYTES),
     maxWorkspaceBytes: positiveInteger(
       env.CLAUDE_KIMI_RELAY_MAX_WORKSPACE_BYTES,
@@ -27903,6 +27914,13 @@ function sanitizedAgentEnvironment(env = process.env) {
 }
 
 // src/doctor.ts
+function meetsNodeFloor(version2) {
+  const parts = version2.replace(/^v/u, "").split(".");
+  const major = Number.parseInt(parts[0] ?? "", 10);
+  const minor = Number.parseInt(parts[1] ?? "", 10);
+  if (!Number.isInteger(major)) return false;
+  return major > 22 || major === 22 && (Number.isInteger(minor) ? minor : 0) >= 14;
+}
 async function commandCheck(name, command, args) {
   try {
     const result = await runCommand(command, args, { allowFailure: true, timeoutMs: 2e4 });
@@ -27936,7 +27954,7 @@ async function runDoctor(config3) {
   const checks = [];
   checks.push({
     name: "Node.js",
-    ok: Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) >= 22,
+    ok: meetsNodeFloor(process.versions.node),
     detail: `${process.version} (requires Node.js 22.14 or newer)`
   });
   checks.push(await commandCheck("Git", "git", ["--version"]));
@@ -31760,6 +31778,7 @@ var SAFE_REVIEW_HINTS = [
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu
 ];
+var SHELL_CHAIN = /(?:>>?|\||;|&&|\|\||`|\$\()/u;
 var MAX_INSPECTABLE_BYTES = 1e5;
 function serializeRequest(request) {
   try {
@@ -31772,6 +31791,14 @@ function serializeRequest(request) {
 function optionMatching(options, pattern) {
   return options.find((option) => pattern.test(`${option.kind ?? ""} ${option.name ?? ""}`));
 }
+function selectAllow(options) {
+  const isAlways = (option) => /always/iu.test(`${option.kind ?? ""} ${option.name ?? ""}`);
+  const oneShot = options.find((option) => option.kind === "allow_once");
+  if (oneShot) return oneShot;
+  return options.find(
+    (option) => !isAlways(option) && /allow|approve|accept/iu.test(`${option.kind ?? ""} ${option.name ?? ""}`)
+  );
+}
 var PermissionPolicy = class {
   decide(request, context) {
     const description = serializeRequest(request);
@@ -31782,15 +31809,15 @@ var PermissionPolicy = class {
       return this.cancelOrDeny(request.options);
     }
     if (context.mode === "review") {
-      const mutating = MUTATION_HINTS.some((pattern) => pattern.test(description));
+      const mutating = MUTATION_HINTS.some((pattern) => pattern.test(description)) || SHELL_CHAIN.test(description);
       const safeRead = SAFE_REVIEW_HINTS.some((pattern) => pattern.test(description));
       if (mutating || !safeRead) return this.cancelOrDeny(request.options);
     }
-    const allow = optionMatching(request.options, /allow|approve|accept/iu);
+    const allow = selectAllow(request.options);
     return allow ? { outcome: "selected", optionId: allow.optionId } : { outcome: "cancelled" };
   }
   cancelOrDeny(options) {
-    const deny = optionMatching(options, /deny|reject/iu);
+    const deny = options.find((option) => option.kind === "reject_once") ?? optionMatching(options, /deny|reject/iu);
     return deny ? { outcome: "selected", optionId: deny.optionId } : { outcome: "cancelled" };
   }
 };
@@ -31836,9 +31863,9 @@ async function terminate(child, options = {}) {
   const group = options.group ?? false;
   const exited = once(child, "exit").then(() => true);
   signalChild(child, "SIGTERM", group);
-  if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)])) return;
+  if (await Promise.race([exited, delay(TERMINATE_GRACE_MS, false, { ref: false })])) return;
   signalChild(child, "SIGKILL", group);
-  await Promise.race([exited, delay(TERMINATE_GRACE_MS, false)]);
+  await Promise.race([exited, delay(TERMINATE_GRACE_MS, false, { ref: false })]);
 }
 var KimiAcpClient = class {
   constructor(config3) {
@@ -32279,24 +32306,39 @@ var WorkspaceManager = class {
       allowFailure: true,
       timeoutMs: 15e3
     });
-    if (gitProbe.exitCode === 0) {
-      return this.prepareGitWorkspace(projectDir, destination, kind, baseRef);
+    try {
+      if (gitProbe.exitCode === 0) {
+        return await this.prepareGitWorkspace(projectDir, destination, kind, baseRef);
+      }
+      const snapshot = await this.copyDirectorySnapshot(projectDir, destination);
+      return {
+        path: destination,
+        warnings: [
+          "Project is not a Git repository; patch generation is unavailable.",
+          ...snapshot.warnings
+        ],
+        diffIsEmpty: false
+      };
+    } catch (error40) {
+      await rm3(destination, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => void 0
+      );
+      throw error40;
     }
-    const snapshot = await this.copyDirectorySnapshot(projectDir, destination);
-    return {
-      path: destination,
-      warnings: [
-        "Project is not a Git repository; patch generation is unavailable.",
-        ...snapshot.warnings
-      ],
-      diffIsEmpty: false
-    };
   }
   async prepareGitWorkspace(projectDir, destination, kind, baseRef) {
     const repositoryRoot = (await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd: projectDir })).stdout.trim();
-    const stagingRoot = await mkdtemp(join4(this.config.dataDir, "relay-base-"));
+    const headProbe = await runCommand("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
+      cwd: repositoryRoot,
+      allowFailure: true,
+      timeoutMs: 15e3
+    });
+    if (headProbe.exitCode !== 0) {
+      throw new RelayError("The Git repository has no commits to review.", "NO_COMMITS");
+    }
     const warnings = [];
     const resolvedBaseRef = await this.resolveBaseRef(repositoryRoot, kind, baseRef, warnings);
+    const stagingRoot = await mkdtemp(join4(this.config.dataDir, "relay-base-"));
     try {
       await runCommand(
         "git",
@@ -32537,6 +32579,19 @@ var WorkspaceManager = class {
 // src/runner.ts
 var TERMINAL = /* @__PURE__ */ new Set(["completed", "failed", "cancelled", "timed_out"]);
 var HEARTBEAT_INTERVAL_MS = 3e4;
+var MAX_EVENTS = 200;
+function capEvents(events) {
+  if (events.length <= MAX_EVENTS) return events;
+  const first = events[0];
+  if (first === void 0) return events;
+  const tailStart = events.length - (MAX_EVENTS - 1);
+  const marker = {
+    at: first.at,
+    status: first.status,
+    message: `[${tailStart} earlier events truncated]`
+  };
+  return [marker, ...events.slice(tailStart)];
+}
 function now() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -32557,7 +32612,7 @@ var TaskRunner = class {
         ...current,
         status,
         updatedAt: at,
-        events: [...current.events, { at, status, message }]
+        events: capEvents([...current.events, { at, status, message }])
       };
     });
   }
@@ -32567,6 +32622,11 @@ var TaskRunner = class {
     let preparedPath;
     let keepWorkspace = record2.keepWorkspace;
     try {
+      record2 = await this.store.update(
+        id,
+        (current) => TERMINAL.has(current.status) ? current : { ...current, ownerPid: process.pid, updatedAt: now() }
+      );
+      if (TERMINAL.has(record2.status)) return record2;
       record2 = await this.transition(
         id,
         "preparing_workspace",
@@ -32594,11 +32654,22 @@ var TaskRunner = class {
       const heartbeat = startHeartbeat({
         intervalMs: HEARTBEAT_INTERVAL_MS,
         onBeat: (elapsedMs) => {
-          void this.transition(
-            id,
-            "running",
-            `Still analyzing \u2014 ${progressCount} update${progressCount === 1 ? "" : "s"} so far, ${Math.round(elapsedMs / 1e3)}s elapsed.`
-          ).catch(() => void 0);
+          void this.store.update(id, (current) => {
+            if (current.status !== "running") return current;
+            const at = now();
+            return {
+              ...current,
+              updatedAt: at,
+              events: capEvents([
+                ...current.events,
+                {
+                  at,
+                  status: "running",
+                  message: `Still analyzing \u2014 ${progressCount} update${progressCount === 1 ? "" : "s"} so far, ${Math.round(elapsedMs / 1e3)}s elapsed.`
+                }
+              ])
+            };
+          }).catch(() => void 0);
         }
       });
       let agentResult;
@@ -32644,10 +32715,10 @@ var TaskRunner = class {
             ...record2.keepWorkspace ? { workspacePath: prepared.path } : {},
             warnings: [...prepared.warnings, ...agentResult.warnings]
           },
-          events: [
+          events: capEvents([
             ...current.events,
             { at: completedAt, status: "completed", message: "Task completed." }
-          ]
+          ])
         };
       });
       return completed;
@@ -32662,7 +32733,10 @@ var TaskRunner = class {
           status,
           updatedAt: failedAt,
           error: toErrorMessage(error40),
-          events: [...current.events, { at: failedAt, status, message: toErrorMessage(error40) }]
+          events: capEvents([
+            ...current.events,
+            { at: failedAt, status, message: toErrorMessage(error40) }
+          ])
         }
       );
       return failed;
@@ -32675,6 +32749,15 @@ var TaskRunner = class {
 };
 
 // src/task-service.ts
+var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["completed", "failed", "cancelled", "timed_out"]);
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error40) {
+    return error40.code === "EPERM";
+  }
+}
 function now2() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -32765,6 +32848,28 @@ var TaskService = class {
       ...child.pid === void 0 ? {} : { pid: child.pid },
       updatedAt: now2()
     }));
+  }
+  // Reconcile tasks left in a non-terminal state by a process that has since
+  // died (server restart, or a SIGKILL/OOM of a background worker that skipped
+  // its terminal write). Without this they are reported as running forever. A
+  // still-alive owner — e.g. a detached worker that outlived its parent server
+  // — is left untouched, and queued tasks (not yet started, no owner) are left
+  // for their worker to pick up. Call at server/CLI startup.
+  // ponytail: liveness is a pid probe; a reused pid could look alive. The window
+  // is a crash-to-next-startup gap and the fix is a pidfile/start-time token if
+  // it ever matters.
+  async reconcileOrphans() {
+    const records = await this.store.list(100);
+    await Promise.all(
+      records.map(async (record2) => {
+        if (TERMINAL_STATUSES.has(record2.status) || record2.status === "queued") return;
+        if (record2.ownerPid !== void 0 && isProcessAlive(record2.ownerPid)) return;
+        await this.markFailed(
+          record2.id,
+          "Task owner process is no longer running; reconciled to failed after restart."
+        ).catch(() => void 0);
+      })
+    );
   }
   get(id) {
     return this.store.get(id);
@@ -32865,7 +32970,9 @@ server.registerTool(
       prompt: external_exports.string().min(3).max(1e5).describe("Complete instruction for the Kimi agent."),
       projectDir: external_exports.string().min(1).optional().describe("Absolute project path. Defaults to the plugin's CLAUDE_PROJECT_DIR."),
       background: external_exports.boolean().default(true).describe("Run detached and poll with get_task, or block until the task finishes."),
-      baseRef: external_exports.string().default("HEAD").describe("Git revision used as the comparison baseline for review and challenge tasks."),
+      baseRef: external_exports.string().optional().describe(
+        "Git revision used as the comparison baseline for review and challenge tasks. Omit to auto-select the merge-base with the branch's upstream."
+      ),
       timeoutMs: external_exports.number().int().min(1e4).max(864e5).optional().describe("Task timeout in milliseconds (10 seconds to 24 hours)."),
       keepWorkspace: external_exports.boolean().default(false).describe("Keep the isolated workspace after completion for manual inspection.")
     })
@@ -32877,7 +32984,7 @@ server.registerTool(
         prompt: input.prompt,
         projectDir: resolveProjectDir(input.projectDir),
         background: input.background,
-        baseRef: input.baseRef,
+        ...input.baseRef === void 0 ? {} : { baseRef: input.baseRef },
         ...input.timeoutMs === void 0 ? {} : { timeoutMs: input.timeoutMs },
         keepWorkspace: input.keepWorkspace
       })
@@ -32946,6 +33053,7 @@ server.registerTool(
   },
   async () => text(await runDoctor(config2))
 );
+await tasks.reconcileOrphans().catch(() => void 0);
 var transport = new StdioServerTransport();
 await server.connect(transport);
 //# sourceMappingURL=mcp.js.map

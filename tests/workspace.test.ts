@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 import test from "node:test";
 
+import { stat } from "node:fs/promises";
+
 import { runCommand } from "../src/process.js";
 import { WorkspaceManager } from "../src/workspace.js";
 import type { RelayConfig } from "../src/types.js";
@@ -259,4 +261,50 @@ void test("review with no explicit baseRef and no upstream falls back to HEAD", 
   assert.equal(prepared.diffIsEmpty, true);
   assert.ok(prepared.warnings.some((warning) => /no changes to review/iu.test(warning)));
   assert.ok(!prepared.warnings.some((warning) => /auto-selected/iu.test(warning)));
+});
+
+void test("reviewing a Git repo with no commits fails with a clear message", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-nocommit-repo-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-nocommit-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init", "-b", "work"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+
+  const manager = new WorkspaceManager(config(dataDir));
+  await assert.rejects(() => manager.prepare("task-nocommit", root, "review", ""), /no commits/iu);
+});
+
+void test("a failed prepare leaves no workspace directory behind", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-leak-repo-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-leak-data-"));
+  t.after(() =>
+    Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(dataDir, { recursive: true, force: true }),
+    ]),
+  );
+
+  await runCommand("git", ["init"], { cwd: root });
+  await runCommand("git", ["config", "user.name", "Test"], { cwd: root });
+  await runCommand("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  await writeFile(join(root, "big.txt"), "x".repeat(5000));
+  await runCommand("git", ["add", "-A"], { cwd: root });
+  await runCommand("git", ["commit", "-m", "big"], { cwd: root });
+
+  // A tiny workspace cap forces WORKSPACE_TOO_LARGE after the destination dir
+  // has already been created, exercising the prepare-failure cleanup path.
+  const tiny: RelayConfig = { ...config(dataDir), maxWorkspaceBytes: 100 };
+  const manager = new WorkspaceManager(tiny);
+  await assert.rejects(
+    () => manager.prepare("task-leak", root, "review", "HEAD"),
+    /copy limit|too large/iu,
+  );
+  await assert.rejects(() => stat(join(dataDir, "workspaces", "task-leak")), /ENOENT/u);
 });

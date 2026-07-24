@@ -34,6 +34,7 @@ Commands:
 async function main(): Promise<void> {
   const config = loadConfig();
   const service = new TaskService(config);
+  await service.reconcileOrphans().catch(() => undefined);
   const [command, ...args] = process.argv.slice(2);
 
   switch (command) {
@@ -49,12 +50,14 @@ async function main(): Promise<void> {
       const prompt = flag(args, "--prompt");
       if (kind === undefined || prompt === undefined) usage();
       const timeoutFlag = flag(args, "--timeout-ms");
+      const base = flag(args, "--base");
       const record = await service.start({
         kind,
         prompt,
         projectDir: flag(args, "--project") ?? process.cwd(),
         background: has(args, "--background"),
-        baseRef: flag(args, "--base") ?? "HEAD",
+        // Omit --base to auto-select the upstream merge-base for review/challenge.
+        ...(base === undefined ? {} : { baseRef: base }),
         ...(timeoutFlag === undefined ? {} : { timeoutMs: Number.parseInt(timeoutFlag, 10) }),
         keepWorkspace: has(args, "--keep-workspace"),
       });
