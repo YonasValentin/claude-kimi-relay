@@ -28,8 +28,13 @@ node scripts/bump-version.mjs 0.1.1   # sets the version in package.json + both
                                       # plugin manifests and rebuilds plugin/dist
 npm run verify                        # format, lint, strict tsc, tests, builds
 git commit -am "release: v0.1.1"
-git tag v0.1.1 && git push --follow-tags
+git tag -a v0.1.1 -m v0.1.1 && git push --follow-tags
 ```
+
+Use an **annotated** tag (`-a`): `git push --follow-tags` only pushes annotated
+tags, so a lightweight `git tag v0.1.1` would push the commit but silently leave
+the tag behind, and `release.yml` (which triggers on the tag) never runs. If you
+already made a lightweight tag, push it explicitly with `git push origin v0.1.1`.
 
 On the tag, `release.yml`:
 
