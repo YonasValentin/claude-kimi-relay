@@ -135,3 +135,20 @@ void test("review denies a safe-read verb that chains or redirects a write", () 
     assert.deepEqual(result, { outcome: "selected", optionId: "deny" }, command);
   }
 });
+
+void test("review denies safe-read verbs that write via flags, binaries, or non-obvious separators", () => {
+  for (const command of [
+    "find . -maxdepth 1 -fprint /home/user/pwned.txt", // find write-action
+    "find . -type f -exec rm {} ;", // find -exec
+    "cat notes.md\nrm -f important.txt", // newline separator + rm binary
+    "cat a.txt & rm b.txt", // bare & separator
+    "cat x.txt; cp x.txt /home/user/evil", // cp binary
+    "ls . && tee /home/user/out", // tee binary
+  ]) {
+    const result = policy.decide(
+      { toolCall: { title: "Run command", rawInput: { command } }, options },
+      { mode: "review", workspaceDir: "/tmp/workspace" },
+    );
+    assert.deepEqual(result, { outcome: "selected", optionId: "deny" }, JSON.stringify(command));
+  }
+});

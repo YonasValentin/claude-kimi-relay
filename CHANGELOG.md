@@ -7,13 +7,13 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 ### Security
 
 - Permission broker no longer selects a session-wide `allow_always` ACP option: it prefers the one-shot allow (and refuses to allow when only an `always` option is offered), and symmetrically prefers `reject_once`. A conforming agent records `allow_always` as a persistent grant and stops re-requesting, so selecting it after one benign call would have bypassed the deny-first gate for the rest of the session.
-- Review/challenge mode now treats a command carrying a shell redirection, append, pipe, chain, or substitution operator (`>` `>>` `|` `;` `&&` `||` `` ` `` `$(`) as mutating, so a leading safe-read verb (`cat`, `grep`) can no longer launder a trailing write such as `echo … > ~/.bashrc` past the read-only gate.
+- Review/challenge mode is stricter about commands that write through a safe-read verb: a shell redirection/append/pipe/chain/substitution operator (`>` `>>` `|` `;` `&` `` ` `` `$(`) or an embedded newline is treated as mutating, as are writer binaries (`tee`, `cp`, `mv`, `rm`, `rmdir`, `mkfifo`) and `find` write/exec actions (`-exec`, `-delete`, `-fprint`, …). This is best-effort defense-in-depth over a string policy, not a sandbox — untrusted repositories still warrant OS-level isolation, as THREAT_MODEL.md notes.
 
 ### Added
 
 - `review`/`challenge` started without an explicit `baseRef` now auto-select the merge-base with the branch's upstream, so "review my work" compares real changes instead of an empty `HEAD..HEAD`. The auto-selected base is reported in a warning and is never silent; with no upstream configured it falls back to the current tree (and the empty-diff warning fires). Applies through the MCP `start_task` tool and the CLI `--base` flag, which previously defaulted to `HEAD` and suppressed the auto-selection. Pass an explicit `baseRef` to override. `delegate` still diffs against the current tree.
 - Long-running tasks emit a periodic liveness event ("Still analyzing — N updates so far, Ms elapsed") whenever Kimi goes a while with no progress update, so a `get_task` poller can tell a slow-but-working run apart from a hung one. The heartbeat only fires during silent gaps and never while real progress is already flowing.
-- Tasks left in a non-terminal state by a crashed server or a hard-killed (SIGKILL/OOM) background worker are reconciled to `failed` at server/CLI startup, using a recorded owner PID to distinguish a dead owner from a detached worker that is still running. Previously such tasks were reported as running forever.
+- Tasks left in a non-terminal state by a crashed server or a hard-killed (SIGKILL/OOM) background worker are reconciled to `failed` at server/CLI startup, using a recorded owner PID (or, for a task still `queued`, the spawned worker PID) to distinguish a dead owner from a detached worker that is still running. Previously such tasks were reported as running or queued forever.
 
 ### Fixed
 

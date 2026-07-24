@@ -161,7 +161,10 @@ export class WorkspaceManager {
       warnings.push(...currentCopy.warnings.map((warning) => `Current snapshot: ${warning}`));
       await this.commitSnapshot(destination, "relay: isolated task baseline");
     } finally {
-      await rm(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      // Swallow a cleanup failure so it cannot mask the original error.
+      await rm(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => undefined,
+      );
     }
 
     // Both snapshots are always committed (--allow-empty), so HEAD^ exists.

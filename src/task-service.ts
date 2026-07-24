@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { RelayConfig, TaskKind, TaskRecord, TaskRequest, TaskStatus } from "./types.js";
 import { RelayError, toErrorMessage } from "./errors.js";
-import { TaskRunner } from "./runner.js";
+import { capEvents, TaskRunner } from "./runner.js";
 import { TaskStore } from "./store.js";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled", "timed_out"]);
@@ -150,8 +150,13 @@ export class TaskService {
     const records = await this.store.list(100);
     await Promise.all(
       records.map(async (record) => {
-        if (TERMINAL_STATUSES.has(record.status) || record.status === "queued") return;
-        if (record.ownerPid !== undefined && isProcessAlive(record.ownerPid)) return;
+        if (TERMINAL_STATUSES.has(record.status)) return;
+        // The owner is the run executor (ownerPid) once it has claimed the task,
+        // or the spawned worker (pid) for a background task still queued. A task
+        // with neither is a foreground run about to start in this process — leave
+        // it. Only a dead, known owner is reconciled.
+        const owner = record.ownerPid ?? record.pid;
+        if (owner === undefined || isProcessAlive(owner)) return;
         await this.markFailed(
           record.id,
           "Task owner process is no longer running; reconciled to failed after restart.",
@@ -179,7 +184,7 @@ export class TaskService {
         status: "failed",
         updatedAt: at,
         error: message,
-        events: [...current.events, { at, status: "failed", message }],
+        events: capEvents([...current.events, { at, status: "failed", message }]),
       };
     });
   }
@@ -204,10 +209,10 @@ export class TaskService {
         ...current,
         status: "cancelled",
         updatedAt: at,
-        events: [
+        events: capEvents([
           ...current.events,
           { at, status: "cancelled", message: "Cancellation requested." },
-        ],
+        ]),
       };
     });
   }

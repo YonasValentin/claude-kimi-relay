@@ -31771,14 +31771,19 @@ var DENY_ALWAYS = [
 var MUTATION_HINTS = [
   /\bwrite\b|\bedit\b|\bdelete\b|\bremove\b|\bmove\b|\brename\b|\bpatch\b/iu,
   /\binstall\b|\bpublish\b|\bdeploy\b|\bcommit\b|\bpush\b/iu,
-  /\bmkdir\b|\btouch\b|\btruncate\b/iu
+  /\bmkdir\b|\btouch\b|\btruncate\b/iu,
+  // Writer binaries a "safe" read verb could shell out to.
+  /\b(?:tee|cp|mv|rm|rmdir|mkfifo)\b/iu,
+  // find(1) actions that write or execute, so `find . -fprint`/`-exec`/`-delete`
+  // cannot pass as a read.
+  /(?:^|\s)-(?:exec|execdir|ok|delete|fprint|fprintf|fprint0)\b/iu
 ];
 var SAFE_REVIEW_HINTS = [
   /\bread\b|\bview\b|\bsearch\b|\bfind\b|\blist\b|\bglob\b|\bgrep\b|\brg\b/iu,
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu
 ];
-var SHELL_CHAIN = /(?:>>?|\||;|&&|\|\||`|\$\()/u;
+var SHELL_CHAIN = /(?:>>?|\||;|&|`|\$\(|\\n|\\r)/u;
 var MAX_INSPECTABLE_BYTES = 1e5;
 function serializeRequest(request) {
   try {
@@ -32360,7 +32365,9 @@ var WorkspaceManager = class {
       warnings.push(...currentCopy.warnings.map((warning) => `Current snapshot: ${warning}`));
       await this.commitSnapshot(destination, "relay: isolated task baseline");
     } finally {
-      await rm3(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      await rm3(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => void 0
+      );
     }
     const diffProbe = await runCommand("git", ["diff", "--quiet", "HEAD^", "HEAD"], {
       cwd: destination,
@@ -32862,8 +32869,9 @@ var TaskService = class {
     const records = await this.store.list(100);
     await Promise.all(
       records.map(async (record2) => {
-        if (TERMINAL_STATUSES.has(record2.status) || record2.status === "queued") return;
-        if (record2.ownerPid !== void 0 && isProcessAlive(record2.ownerPid)) return;
+        if (TERMINAL_STATUSES.has(record2.status)) return;
+        const owner = record2.ownerPid ?? record2.pid;
+        if (owner === void 0 || isProcessAlive(owner)) return;
         await this.markFailed(
           record2.id,
           "Task owner process is no longer running; reconciled to failed after restart."
@@ -32888,7 +32896,7 @@ var TaskService = class {
         status: "failed",
         updatedAt: at,
         error: message,
-        events: [...current.events, { at, status: "failed", message }]
+        events: capEvents([...current.events, { at, status: "failed", message }])
       };
     });
   }
@@ -32910,10 +32918,10 @@ var TaskService = class {
         ...current,
         status: "cancelled",
         updatedAt: at,
-        events: [
+        events: capEvents([
           ...current.events,
           { at, status: "cancelled", message: "Cancellation requested." }
-        ]
+        ])
       };
     });
   }

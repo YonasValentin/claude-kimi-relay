@@ -106,3 +106,20 @@ void test("reconcileOrphans fails non-terminal tasks whose owner process is gone
   assert.equal((await service.get(queued.id)).status, "queued"); // never started, left alone
   assert.equal((await service.get(done.id)).status, "completed"); // terminal untouched
 });
+
+void test("reconcileOrphans fails a queued task whose spawned worker died before starting", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-reap2-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const store = new TaskStore(dataDir);
+  await store.initialize();
+
+  const queuedDeadWorker = makeRecord({ status: "queued", pid: 2_147_483_646 }); // spawned, worker gone
+  const queuedNoOwner = makeRecord({ status: "queued" }); // foreground about to start in-process
+  for (const record of [queuedDeadWorker, queuedNoOwner]) await store.create(record);
+
+  const service = new TaskService(config(dataDir));
+  await service.reconcileOrphans();
+
+  assert.equal((await service.get(queuedDeadWorker.id)).status, "failed");
+  assert.equal((await service.get(queuedNoOwner.id)).status, "queued"); // no owner yet, left alone
+});

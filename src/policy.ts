@@ -25,6 +25,11 @@ const MUTATION_HINTS = [
   /\bwrite\b|\bedit\b|\bdelete\b|\bremove\b|\bmove\b|\brename\b|\bpatch\b/iu,
   /\binstall\b|\bpublish\b|\bdeploy\b|\bcommit\b|\bpush\b/iu,
   /\bmkdir\b|\btouch\b|\btruncate\b/iu,
+  // Writer binaries a "safe" read verb could shell out to.
+  /\b(?:tee|cp|mv|rm|rmdir|mkfifo)\b/iu,
+  // find(1) actions that write or execute, so `find . -fprint`/`-exec`/`-delete`
+  // cannot pass as a read.
+  /(?:^|\s)-(?:exec|execdir|ok|delete|fprint|fprintf|fprint0)\b/iu,
 ];
 
 const SAFE_REVIEW_HINTS = [
@@ -34,10 +39,13 @@ const SAFE_REVIEW_HINTS = [
 ];
 
 // Shell operators that can smuggle a write past a safe-read verb (a redirect,
-// append, pipe-into-writer, or command chain). In review mode any command
-// carrying one is treated as mutating: a leading `cat`/`grep` must not launder
-// a trailing `> ~/.bashrc` or `; rm ...`.
-const SHELL_CHAIN = /(?:>>?|\||;|&&|\|\||`|\$\()/u;
+// append, pipe-into-writer, or command chain — including a bare `&`, and a
+// newline/CR which JSON-serializes to `\n`/`\r` in the inspected string). In
+// review mode any command carrying one is treated as mutating: a leading
+// `cat`/`grep` must not launder a trailing `> ~/.bashrc`, `; rm ...`, or a
+// second line. This is best-effort defense-in-depth over a string policy, not
+// a sandbox — see THREAT_MODEL.md; untrusted repos still warrant OS isolation.
+const SHELL_CHAIN = /(?:>>?|\||;|&|`|\$\(|\\n|\\r)/u;
 
 // A permission request whose serialization exceeds this cannot be fully
 // inspected by the deny list. Truncating it (the previous behaviour) let a

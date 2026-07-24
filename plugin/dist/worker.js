@@ -15005,14 +15005,19 @@ var DENY_ALWAYS = [
 var MUTATION_HINTS = [
   /\bwrite\b|\bedit\b|\bdelete\b|\bremove\b|\bmove\b|\brename\b|\bpatch\b/iu,
   /\binstall\b|\bpublish\b|\bdeploy\b|\bcommit\b|\bpush\b/iu,
-  /\bmkdir\b|\btouch\b|\btruncate\b/iu
+  /\bmkdir\b|\btouch\b|\btruncate\b/iu,
+  // Writer binaries a "safe" read verb could shell out to.
+  /\b(?:tee|cp|mv|rm|rmdir|mkfifo)\b/iu,
+  // find(1) actions that write or execute, so `find . -fprint`/`-exec`/`-delete`
+  // cannot pass as a read.
+  /(?:^|\s)-(?:exec|execdir|ok|delete|fprint|fprintf|fprint0)\b/iu
 ];
 var SAFE_REVIEW_HINTS = [
   /\bread\b|\bview\b|\bsearch\b|\bfind\b|\blist\b|\bglob\b|\bgrep\b|\brg\b/iu,
   /\bgit\s+(?:status|diff|show|log|branch|rev-parse)\b/iu,
   /\b(?:cat|head|tail|sed\s+-n|wc|pwd|ls)\b/iu
 ];
-var SHELL_CHAIN = /(?:>>?|\||;|&&|\|\||`|\$\()/u;
+var SHELL_CHAIN = /(?:>>?|\||;|&|`|\$\(|\\n|\\r)/u;
 var MAX_INSPECTABLE_BYTES = 1e5;
 function serializeRequest(request) {
   try {
@@ -15694,7 +15699,9 @@ var WorkspaceManager = class {
       warnings.push(...currentCopy.warnings.map((warning) => `Current snapshot: ${warning}`));
       await this.commitSnapshot(destination, "relay: isolated task baseline");
     } finally {
-      await rm2(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      await rm2(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(
+        () => void 0
+      );
     }
     const diffProbe = await runCommand("git", ["diff", "--quiet", "HEAD^", "HEAD"], {
       cwd: destination,
