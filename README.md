@@ -50,7 +50,7 @@ Beyond that:
 - Review and challenge tasks refuse write permissions outright.
 - File reads and writes over ACP resolve to canonical paths and get rejected if they leave the workspace, follow a symlink out of it, exceed the size limit, or point at something that looks like a credential.
 - Publishing, pushing, committing, installing dependencies, network tools, `sudo`, and the usual credential paths are denied by default.
-- Kimi inherits a short allowlist of environment variables rather than your entire environment.
+- Kimi inherits an allowlist of environment variables rather than your entire environment. The allowlist matches by prefix and deliberately passes Kimi's own `KIMI_*` and `MOONSHOT_*` variables through, since that is how you point Kimi at your own provider — which also means those variables decide which model, reasoning level, endpoint, and credential Kimi uses. See [Pointing Kimi at a different model](#pointing-kimi-at-a-different-model).
 - Task files are written atomically behind a cross-process lock, and results, command output, copied files, and workspace size are all bounded.
 
 Now the part that matters more than the list above: this is not an operating-system sandbox. Kimi runs as you, with your permissions. The command policy is string matching, and string matching loses to anyone who genuinely wants around it. A malicious repository can also run code through its own build scripts before any of this applies. If the repository is untrusted, or the machine holds something you cannot afford to lose, run the whole thing inside a VM or container with restricted mounts and no credentials.
@@ -161,6 +161,14 @@ Terminal alternatives: failed, cancelled, timed_out
 | `CLAUDE_KIMI_RELAY_MAX_FILE_BYTES`      |                            `5242880` | Maximum copied/read/written file size |
 | `CLAUDE_KIMI_RELAY_MAX_WORKSPACE_BYTES` |                         `2147483648` | Maximum snapshot size                 |
 | `CLAUDE_KIMI_RELAY_MAX_RESULT_BYTES`    |                           `10485760` | Maximum streamed textual result       |
+
+## Pointing Kimi at a different model
+
+The relay does not own the model choice, and it deliberately adds no variable of its own for it. Kimi already has a documented channel, and the relay forwards it: the environment allowlist passes every `KIMI_*` and `MOONSHOT_*` variable through to `kimi acp` untouched.
+
+So a persistent default belongs in Kimi's own configuration — `default_model` and `[thinking] effort` in `~/.kimi-code/config.toml` — or in Kimi's environment family, where `KIMI_MODEL_NAME` plus `KIMI_MODEL_API_KEY` synthesize a provider that overrides that default, and `KIMI_MODEL_THINKING_EFFORT` forces a reasoning level. Kimi's documentation is the authority on precedence between them.
+
+The consequence worth knowing: whatever environment Claude Code launched the plugin's MCP server in is the environment every relayed task inherits. If a task behaves unexpectedly, check those variables before suspecting the relay.
 
 ## Local development
 

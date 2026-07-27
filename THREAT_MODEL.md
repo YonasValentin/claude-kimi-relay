@@ -6,6 +6,8 @@
 - Credentials and sensitive files on the developer machine.
 - Package registries, deployment targets, and remote Git repositories.
 - Integrity of task records and generated patches.
+- Integrity of the second opinion: which agent, model, and reasoning level produced a result.
+- The developer's Kimi account quota and spend.
 
 ## Boundaries
 
@@ -22,7 +24,7 @@
 - Delegate output is a binary Git patch relative to that baseline.
 - Publishing, pushes, commits, dependency installation, network utilities, privilege escalation, and common credential paths are denied by default.
 - Task JSON updates use atomic replacement and per-task cross-process locks.
-- Kimi inherits a small environment allowlist, with credentials stripped from any forwarded proxy URL.
+- Kimi inherits an environment allowlist, with credentials stripped from any forwarded proxy URL. The allowlist matches by prefix and deliberately includes Kimi's own `KIMI_*` and `MOONSHOT_*` families, because that is how a developer points Kimi at their own provider. Per Kimi's documentation those variables can change which model answers (`KIMI_MODEL_NAME`), which reasoning level it uses (`KIMI_MODEL_THINKING_EFFORT`, which bypasses the model's declared effort levels), which endpoint receives the request (`KIMI_MODEL_BASE_URL`), which credential is used (`KIMI_MODEL_API_KEY`), and where Kimi's config, sessions, logs, and OAuth credentials live (`KIMI_CODE_HOME`). They are read from the environment the relay itself was started in, not from anything a task can supply.
 - Copied symlinks are rewritten to workspace-relative targets, and the agent runs in its own process group so termination reaches any helper it spawned.
 
 ## Residual risks

@@ -10,6 +10,6 @@ Start a `review` task using the project directory already configured on the plug
 
 - `prompt`: use `$ARGUMENTS`, or "Review the current changes for material defects" when empty
 - `background`: `true` unless the user explicitly asks for a foreground result
-- `baseRef`: parse `--base <ref>` from `$ARGUMENTS` when present; otherwise `HEAD`
+- `baseRef`: parse `--base <ref>` from `$ARGUMENTS` when present; otherwise omit it, so the relay auto-selects the merge-base with the branch's upstream
 
 Return the task ID. When the user asks for the result, call `get_task`, summarize Kimi's findings, and independently sanity-check high-severity claims before presenting them as facts.
