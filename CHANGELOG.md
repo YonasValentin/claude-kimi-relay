@@ -16,6 +16,7 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ### Fixed
 
+- Task-lock contention on Windows is waited on instead of thrown. `open(path, "wx")` answers EEXIST on POSIX, but Windows also answers EPERM, EACCES or EBUSY when the lock file is open elsewhere or pending deletion -- a file marked for delete stays visible until its last handle closes. The retry loop treated anything but EEXIST as fatal, so a task update failed outright rather than waiting its turn. Reachable in production whenever the MCP server and a background worker touch the same task; it surfaced first as an intermittently red Windows CI leg.
 - `doctor` checked Kimi with the relay's full environment while the ACP spawn sanitizes it, so a green tick could reflect a variable the real task never sees. The Kimi check now uses the same restricted environment and says so. Git deliberately keeps the full environment: it is a host diagnostic.
 - Errors raised inside the ACP protocol were re-wrapped as a generic `KIMI_ACP_FAILED`, discarding the specific code and message — the sign-in instructions for an unauthenticated agent, the versions to align on a protocol mismatch, the result-size limit. They now reach the caller intact.
 - `KIMI_EXITED` reported an exit code and discarded the agent's stderr, which is the only place a dying agent explains itself.

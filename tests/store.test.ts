@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { TaskStore } from "../src/store.js";
+import { TaskStore, isLockContention } from "../src/store.js";
 import type { TaskRecord } from "../src/types.js";
 
 void test("taskPath accepts uppercase UUIDs, matching the MCP uuid validator", () => {
@@ -98,4 +98,22 @@ void test("update reclaims a stale lock abandoned by a dead holder", async (t) =
 
   const updated = await store.update(task.id, (current) => ({ ...current, status: "running" }));
   assert.equal(updated.status, "running");
+});
+
+void test("Windows lock contention codes are waited on, not thrown", () => {
+  // A Windows CI run failed the concurrent-update test with EPERM on the lock
+  // file: a file pending deletion stays visible until its last handle closes,
+  // and opening it in that window is refused with EPERM rather than EEXIST. The
+  // retry loop treated anything but EEXIST as fatal, so a task update failed
+  // outright instead of waiting its turn -- reachable in production whenever
+  // the MCP server and a background worker touch the same task.
+  for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+    assert.equal(isLockContention(code, "win32"), true, `${code} should be contention on Windows`);
+    assert.equal(isLockContention(code, "linux"), false, `${code} is unambiguous on POSIX`);
+  }
+  assert.equal(isLockContention("EEXIST", "linux"), true);
+  assert.equal(isLockContention("EEXIST", "win32"), true);
+  // A genuinely broken path must still fail fast rather than spin to the timeout.
+  assert.equal(isLockContention("ENOENT", "win32"), false);
+  assert.equal(isLockContention(undefined, "win32"), false);
 });

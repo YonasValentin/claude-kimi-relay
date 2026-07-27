@@ -15755,6 +15755,10 @@ import { open, mkdir as mkdir2, readFile as readFile2, readdir, rename, rm, stat
 import { dirname as dirname3, join as join2 } from "node:path";
 var LOCK_TIMEOUT_MS = 1e4;
 var STALE_LOCK_MS = 6e4;
+function isLockContention(code, platform) {
+  if (code === "EEXIST") return true;
+  return platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY");
+}
 function sleep(ms) {
   return new Promise((resolve4) => setTimeout(resolve4, ms));
 }
@@ -15796,7 +15800,7 @@ var TaskStore = class {
         }
       } catch (error40) {
         const code = error40.code;
-        if (code !== "EEXIST") throw error40;
+        if (!isLockContention(code, process.platform)) throw error40;
         if (await this.reclaimIfDead(path)) continue;
         if (Date.now() >= deadline) {
           throw new RelayError(`Timed out waiting for task ${id} lock.`, "TASK_LOCK_TIMEOUT", {

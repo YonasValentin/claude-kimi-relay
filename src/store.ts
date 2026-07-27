@@ -8,6 +8,23 @@ import type { TaskRecord } from "./types.js";
 const LOCK_TIMEOUT_MS = 10_000;
 const STALE_LOCK_MS = 60_000;
 
+// Which `open(path, "wx")` failures mean "someone else holds this lock" rather
+// than "this will never work".
+//
+// POSIX answers EEXIST and nothing else. Windows also answers EPERM, EACCES or
+// EBUSY when the lock file is open in another process or is pending deletion --
+// a file marked for delete stays visible until the last handle closes, and
+// opening it in that window is refused. Treating those as fatal made a
+// concurrent update throw outright instead of waiting its turn.
+//
+// The distinction is kept per-platform because on POSIX those codes are
+// unambiguous: they really do mean the directory is not writable, and failing
+// fast there beats spinning until the lock timeout.
+export function isLockContention(code: string | undefined, platform: string): boolean {
+  if (code === "EEXIST") return true;
+  return platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY");
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -59,7 +76,7 @@ export class TaskStore {
         }
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST") throw error;
+        if (!isLockContention(code, process.platform)) throw error;
         if (await this.reclaimIfDead(path)) continue;
         if (Date.now() >= deadline) {
           throw new RelayError(`Timed out waiting for task ${id} lock.`, "TASK_LOCK_TIMEOUT", {
