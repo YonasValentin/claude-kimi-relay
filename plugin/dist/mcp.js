@@ -27914,6 +27914,7 @@ function sanitizedAgentEnvironment(env = process.env) {
 }
 
 // src/doctor.ts
+var RESTRICTED_ENV_NOTE = "(checked with the same restricted environment the relay gives the agent)";
 function meetsNodeFloor(version2) {
   const parts = version2.replace(/^v/u, "").split(".");
   const major = Number.parseInt(parts[0] ?? "", 10);
@@ -27921,9 +27922,13 @@ function meetsNodeFloor(version2) {
   if (!Number.isInteger(major)) return false;
   return major > 22 || major === 22 && (Number.isInteger(minor) ? minor : 0) >= 14;
 }
-async function commandCheck(name, command, args) {
+async function commandCheck(name, command, args, env) {
   try {
-    const result = await runCommand(command, args, { allowFailure: true, timeoutMs: 2e4 });
+    const result = await runCommand(command, args, {
+      allowFailure: true,
+      timeoutMs: 2e4,
+      ...env === void 0 ? {} : { env }
+    });
     return {
       name,
       ok: result.exitCode === 0,
@@ -27958,7 +27963,13 @@ async function runDoctor(config3) {
     detail: `${process.version} (requires Node.js 22.14 or newer)`
   });
   checks.push(await commandCheck("Git", "git", ["--version"]));
-  checks.push(await commandCheck("Kimi Code", config3.kimiCliPath, ["--version"]));
+  const kimi = await commandCheck(
+    "Kimi Code",
+    config3.kimiCliPath,
+    ["--version"],
+    sanitizedAgentEnvironment()
+  );
+  checks.push({ ...kimi, detail: `${kimi.detail} ${RESTRICTED_ENV_NOTE}` });
   checks.push(await stateDirectoryCheck(config3));
   return checks;
 }
