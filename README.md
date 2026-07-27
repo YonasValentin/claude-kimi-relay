@@ -162,6 +162,22 @@ Terminal alternatives: failed, cancelled, timed_out
 | `CLAUDE_KIMI_RELAY_MAX_WORKSPACE_BYTES` |                         `2147483648` | Maximum snapshot size                 |
 | `CLAUDE_KIMI_RELAY_MAX_RESULT_BYTES`    |                           `10485760` | Maximum streamed textual result       |
 
+## Asking for a specific model or reasoning level
+
+A single task can request one, on the CLI or through `start_task`:
+
+```bash
+claude-kimi-relay start --kind challenge --project . \
+  --thinking-effort max \
+  --prompt "Challenge the retry and rollback design"
+```
+
+The value is a lookup key, never something sent to the agent verbatim: it is matched against the models and levels the agent advertises for that session. Ask for something it does not offer and the task still runs at the agent's own default, with a warning naming what was available. That is deliberate — a review that ran on the default model and found a real defect is worth more than no review at all.
+
+Order matters and the relay handles it: the model is set first, because choosing a model can rewrite the reasoning scale or remove it entirely. Ask for `--model` with no reasoning support plus `--thinking-effort max` and you will get the model, a warning about the effort, and a result that reports what actually ran.
+
+The skills pass these through only when you name a model or level yourself. They will not infer one from your repository, which matters because a repository under review is not a neutral party about how it gets reviewed.
+
 ## Which model answered
 
 A completed task reports what produced it, under `result.agentConfig`:

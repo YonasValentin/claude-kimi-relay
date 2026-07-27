@@ -280,7 +280,10 @@ export interface AppliedConfig {
   readonly warnings: readonly string[];
 }
 
-/** Sends one `session/set_config_option` and resolves with the response's `configOptions`. */
+/**
+ * Sends one `session/set_config_option` and resolves with the agent's response,
+ * whose `configOptions` must carry the complete option state.
+ */
 export type SetConfigOption = (configId: string, value: string) => Promise<unknown>;
 
 const METHOD_NOT_FOUND = -32601;
@@ -369,7 +372,7 @@ export async function applyConfigRequests(
       case "apply": {
         try {
           const response = await setOption(resolution.configId, resolution.value);
-          const next = parseConfigOptions(response);
+          const next = parseConfigOptions(asRecord(response)?.configOptions);
           // The response must carry the complete state. An empty one would mean
           // the agent contradicted itself, so the known state is kept instead of
           // reporting a session with no options at all.

@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import type {
   AgentConfigReport,
+  AgentConfigRequestOutcome,
   AgentRunRequest,
   AgentRunResult,
   PermissionRequestLike,
@@ -19,9 +20,13 @@ import { PermissionPolicy } from "./policy.js";
 import { sanitizedAgentEnvironment } from "./process.js";
 import {
   ConfigTracker,
-  parseConfigOptions,
+  EFFORT_TARGET,
+  MODEL_TARGET,
+  applyConfigRequests,
+  setRequestBody,
   summarizeConfigOptions,
   toConfigSnapshot,
+  type ConfigRequest,
 } from "./session-config.js";
 import { VERSION } from "./version.js";
 
@@ -148,6 +153,8 @@ export class KimiAcpClient {
     const input = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
     const stream = acp.ndJsonStream(output, input);
     const chunks: string[] = [];
+    const configWarnings: string[] = [];
+    const configOutcomes: AgentConfigRequestOutcome[] = [];
     let resultBytes = 0;
     const mode = request.kind === "delegate" ? "delegate" : "review";
 
@@ -251,9 +258,41 @@ export class KimiAcpClient {
             // The agent reports its model, reasoning level and mode here, before
             // the prompt is even sent. Reading it is the whole reason a result
             // can say what produced it.
-            const tracker = new ConfigTracker(
-              parseConfigOptions(session.newSessionResponse.configOptions),
+            //
+            // The model request must come first: setting it can rewrite the
+            // reasoning scale, or remove it entirely for a model that cannot
+            // reason, so the effort has to resolve against whatever comes back.
+            const configRequests: ConfigRequest[] = [];
+            if (request.model !== undefined) {
+              configRequests.push({
+                target: MODEL_TARGET,
+                label: "model",
+                requested: request.model,
+              });
+            }
+            if (request.thinkingEffort !== undefined) {
+              configRequests.push({
+                target: EFFORT_TARGET,
+                label: "thinking effort",
+                requested: request.thinkingEffort,
+              });
+            }
+            const applied = await applyConfigRequests(
+              session.newSessionResponse.configOptions,
+              configRequests,
+              async (configId, value) =>
+                ctx.request(acp.methods.agent.session.setConfigOption, {
+                  sessionId: session.sessionId,
+                  ...setRequestBody(configId, value),
+                }),
             );
+            configWarnings.push(...applied.warnings);
+            configOutcomes.push(...applied.outcomes);
+            for (const warning of applied.warnings) await onProgress(warning);
+            // Baselined from the responses, so the notification the agent emits
+            // for each of our own sets is recognised as an echo and not narrated
+            // a second time.
+            const tracker = new ConfigTracker(applied.state);
             const introduction = [
               `Kimi ACP session ${session.sessionId} started`,
               agent === undefined ? undefined : `${agent.name} ${agent.version}`.trim(),
@@ -306,6 +345,7 @@ export class KimiAcpClient {
               options,
               ...(result.agent === undefined ? {} : { agent: result.agent }),
               ...(envOverrides.length === 0 ? {} : { envOverrides }),
+              ...(configOutcomes.length === 0 ? {} : { requests: configOutcomes }),
               ...(result.tracker.changedDuringRun ? { changedDuringRun: true } : {}),
             };
       return {
@@ -313,7 +353,7 @@ export class KimiAcpClient {
         stopReason: result.response.stopReason,
         sessionId: result.sessionId,
         ...(agentConfig === undefined ? {} : { agentConfig }),
-        warnings: [],
+        warnings: configWarnings,
       };
     } catch (error) {
       if (controller.signal.aborted) {

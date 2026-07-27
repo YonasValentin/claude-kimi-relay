@@ -24,6 +24,12 @@ export interface TaskRequest {
   readonly baseRef?: string;
   readonly timeoutMs?: number;
   readonly keepWorkspace?: boolean;
+  // Optional agent configuration to request for this task. Both are matched
+  // against the values the agent advertises for the session; neither is ever
+  // sent to the agent as a raw string. See AgentConfigReport for what comes
+  // back, including whether the request was honoured.
+  readonly model?: string;
+  readonly thinkingEffort?: string;
 }
 
 export interface TaskEvent {
@@ -94,6 +100,12 @@ export interface TaskRecord {
   readonly background: boolean;
   readonly keepWorkspace: boolean;
   readonly timeoutMs: number;
+  // Persisted, not just held in memory: a background task is executed by a
+  // detached worker that re-reads the record from disk, so a request that lived
+  // only on TaskRequest would be silently dropped for every background run --
+  // which is the default.
+  readonly model?: string;
+  readonly thinkingEffort?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly status: TaskStatus;
@@ -130,6 +142,8 @@ export interface AgentRunRequest {
   readonly prompt: string;
   readonly workspaceDir: string;
   readonly timeoutMs: number;
+  readonly model?: string;
+  readonly thinkingEffort?: string;
 }
 
 export interface AgentRunResult {

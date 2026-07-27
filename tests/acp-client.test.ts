@@ -40,6 +40,8 @@ async function run(
     readonly timeoutMs?: number;
     readonly relay?: Partial<RelayConfig>;
     readonly progress?: string[];
+    readonly model?: string;
+    readonly thinkingEffort?: string;
   } = {},
 ): Promise<AgentRunResult> {
   // KIMI_TEST_SCENARIO must keep its prefix: the relay filters the agent's
@@ -55,6 +57,8 @@ async function run(
         prompt: "review the changes",
         workspaceDir,
         timeoutMs: options.timeoutMs ?? 30_000,
+        ...(options.model === undefined ? {} : { model: options.model }),
+        ...(options.thinkingEffort === undefined ? {} : { thinkingEffort: options.thinkingEffort }),
       },
       (message) => {
         options.progress?.push(message);
@@ -215,6 +219,78 @@ void test("a model or effort change during the run is reported, not overwritten 
   assert.equal(agentConfig.summary, "Model=fake/large, Thinking=low");
   assert.equal(agentConfig.changedDuringRun, true);
   assert.match(progress.join("\n"), /Thinking high -> low/u);
+});
+
+void test("a requested model and effort are applied and reported as applied", async (t) => {
+  const dir = await workspace(t);
+  const progress: string[] = [];
+
+  const { agentConfig, warnings } = await run("ok", dir, {
+    progress,
+    model: "fake/large",
+    thinkingEffort: "max",
+  });
+
+  assert.ok(agentConfig);
+  assert.equal(agentConfig.summary, "Model=fake/large, Thinking=max");
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(
+    agentConfig.requests?.map((outcome) => [
+      outcome.configId,
+      outcome.applied,
+      outcome.effectiveValue,
+    ]),
+    [
+      // The model is already current, so it is reported applied without a call.
+      ["model", true, "fake/large"],
+      ["thinking", true, "max"],
+    ],
+  );
+  // The agent echoes each set as a notification as well as answering it. Those
+  // echoes must not be narrated as changes the agent made on its own.
+  assert.equal(progress.filter((line) => line.includes("changed its session config")).length, 0);
+});
+
+void test("an effort the model cannot offer after a model switch is refused, not sent", async (t) => {
+  const dir = await workspace(t);
+
+  // fake/small has no reasoning levels, so switching to it collapses the
+  // thinking scale to off/on -- the live-proven Kimi behaviour. Requesting max
+  // alongside it must resolve against the new scale, not the old one.
+  const { agentConfig, warnings } = await run("ok", dir, {
+    model: "fake/small",
+    thinkingEffort: "max",
+  });
+
+  assert.ok(agentConfig);
+  assert.equal(agentConfig.summary, "Model=fake/small, Thinking=on");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? "", /does not offer thinking effort "max".*off, on/u);
+  assert.equal(agentConfig.requests?.[1]?.applied, false);
+});
+
+void test("a task still runs when the agent refuses the requested configuration", async (t) => {
+  const dir = await workspace(t);
+
+  // The request is an optimisation; the review is the deliverable. Losing a
+  // completed review because a knob would not turn is the worse outcome.
+  const result = await run("reject-config", dir, { thinkingEffort: "max" });
+
+  assert.equal(result.text, "fake review: nothing to report");
+  assert.match(result.warnings[0] ?? "", /refused to set thinking effort/u);
+});
+
+void test("an agent without set_config_option is reported once and still does the work", async (t) => {
+  const dir = await workspace(t);
+
+  const result = await run("no-set-support", dir, {
+    model: "fake/small",
+    thinkingEffort: "max",
+  });
+
+  assert.equal(result.text, "fake review: nothing to report");
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0] ?? "", /does not support session\/set_config_option/u);
 });
 
 void test("an environment override is reported by name, never by value", async (t) => {

@@ -136,6 +136,10 @@ export class TaskRunner {
             prompt: buildPrompt(record.kind, record.prompt, prepared.diffIsEmpty),
             workspaceDir: prepared.path,
             timeoutMs: record.timeoutMs,
+            ...(record.model === undefined ? {} : { model: record.model }),
+            ...(record.thinkingEffort === undefined
+              ? {}
+              : { thinkingEffort: record.thinkingEffort }),
           },
           async (message) => {
             progressCount += 1;

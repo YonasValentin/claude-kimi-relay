@@ -60,7 +60,7 @@ function fakeAgent(initialModel = "kimi-code/k3", initialThinking = "high") {
       if (configId === "model") model = value;
       if (configId === "thinking") thinking = value;
       inFlight = false;
-      return snapshot();
+      return { configOptions: snapshot() };
     },
   };
 }
@@ -122,22 +122,24 @@ void test("state is rebuilt from the response, not patched locally", async () =>
   // patched copy would report a session that does not exist.
   const setOption = async (): Promise<unknown> => {
     await Promise.resolve();
-    return [
-      {
-        type: "select",
-        id: "thinking",
-        name: "Thinking",
-        currentValue: "max",
-        options: [{ value: "max" }],
-      },
-      {
-        type: "select",
-        id: "mode",
-        name: "Mode",
-        currentValue: "plan",
-        options: [{ value: "plan" }],
-      },
-    ];
+    return {
+      configOptions: [
+        {
+          type: "select",
+          id: "thinking",
+          name: "Thinking",
+          currentValue: "max",
+          options: [{ value: "max" }],
+        },
+        {
+          type: "select",
+          id: "mode",
+          name: "Mode",
+          currentValue: "plan",
+          options: [{ value: "plan" }],
+        },
+      ],
+    };
   };
 
   const result = await applyConfigRequests(
@@ -186,22 +188,24 @@ void test("a refused set becomes a warning and does not stop the next request", 
     await Promise.resolve();
     calls.push(configId);
     if (configId === "model") throw Object.assign(new Error("Unknown model"), { code: -32602 });
-    return [
-      {
-        type: "select",
-        id: "model",
-        name: "Model",
-        currentValue: "a",
-        options: [{ value: "a" }, { value: "b" }],
-      },
-      {
-        type: "select",
-        id: "thinking",
-        name: "Thinking",
-        currentValue: "max",
-        options: [{ value: "low" }, { value: "max" }],
-      },
-    ];
+    return {
+      configOptions: [
+        {
+          type: "select",
+          id: "model",
+          name: "Model",
+          currentValue: "a",
+          options: [{ value: "a" }, { value: "b" }],
+        },
+        {
+          type: "select",
+          id: "thinking",
+          name: "Thinking",
+          currentValue: "max",
+          options: [{ value: "low" }, { value: "max" }],
+        },
+      ],
+    };
   };
 
   const result = await applyConfigRequests(
@@ -292,15 +296,17 @@ void test("a silent downgrade is reported, even though the set itself succeeded"
   // success, so only comparing against the final state catches it.
   const setOption = async (): Promise<unknown> => {
     await Promise.resolve();
-    return [
-      {
-        type: "select",
-        id: "thinking",
-        name: "Thinking",
-        currentValue: "high",
-        options: [{ value: "high" }, { value: "max" }],
-      },
-    ];
+    return {
+      configOptions: [
+        {
+          type: "select",
+          id: "thinking",
+          name: "Thinking",
+          currentValue: "high",
+          options: [{ value: "high" }, { value: "max" }],
+        },
+      ],
+    };
   };
 
   const result = await applyConfigRequests(
@@ -325,7 +331,7 @@ void test("a silent downgrade is reported, even though the set itself succeeded"
 void test("an empty response keeps the known state instead of erasing it", async () => {
   const setOption = async (): Promise<unknown> => {
     await Promise.resolve();
-    return [];
+    return { configOptions: [] };
   };
 
   const result = await applyConfigRequests(

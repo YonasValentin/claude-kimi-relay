@@ -52,31 +52,34 @@ function ask(method, params) {
   });
 }
 
-const CONFIG_OPTIONS = [
-  {
-    type: "select",
-    id: "model",
-    name: "Model",
-    category: "model",
-    currentValue: "fake/large",
-    options: [
-      { value: "fake/large", name: "Large" },
-      { value: "fake/small", name: "Small" },
-    ],
-  },
-  {
-    type: "select",
-    id: "thinking",
-    name: "Thinking",
-    category: "thought_level",
-    currentValue: "high",
-    options: [
-      { value: "low", name: "Low" },
-      { value: "high", name: "High" },
-      { value: "max", name: "Max" },
-    ],
-  },
-];
+// Mirrors Kimi's rule: a model that supports reasoning levels exposes them, and
+// one that does not falls back to the legacy off/on pair. So changing the model
+// rewrites the thinking option, which is the case the relay has to survive.
+const EFFORTS = { "fake/large": ["low", "high", "max"], "fake/small": ["off", "on"] };
+const state = { model: "fake/large", thinking: "high" };
+
+function configOptions() {
+  const efforts = EFFORTS[state.model];
+  if (!efforts.includes(state.thinking)) state.thinking = efforts[efforts.length - 1];
+  return [
+    {
+      type: "select",
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: state.model,
+      options: Object.keys(EFFORTS).map((value) => ({ value, name: value })),
+    },
+    {
+      type: "select",
+      id: "thinking",
+      name: "Thinking",
+      category: "thought_level",
+      currentValue: state.thinking,
+      options: efforts.map((value) => ({ value, name: value })),
+    },
+  ];
+}
 
 async function runPrompt(id) {
   switch (scenario) {
@@ -121,10 +124,8 @@ async function runPrompt(id) {
       textChunk("switching gears");
       // An agent may change model or reasoning level mid-turn, for instance
       // when it falls back after a rate limit.
-      update({
-        sessionUpdate: "config_option_update",
-        configOptions: [CONFIG_OPTIONS[0], { ...CONFIG_OPTIONS[1], currentValue: "low" }],
-      });
+      state.thinking = "low";
+      update({ sessionUpdate: "config_option_update", configOptions: configOptions() });
       break;
     case "silent":
       // Never responds. The relay's own timeout has to end the run.
@@ -167,13 +168,31 @@ function handle(message) {
     case "session/new":
       respond(message.id, {
         sessionId,
-        ...(scenario === "no-config" ? {} : { configOptions: CONFIG_OPTIONS }),
+        ...(scenario === "no-config" ? {} : { configOptions: configOptions() }),
       });
       if (scenario === "exit-after-session") {
         process.stderr.write("fake agent could not start its model\n");
         process.exit(3);
       }
       return;
+    case "session/set_config_option": {
+      if (scenario === "reject-config") {
+        fail(message.id, -32602, `Unknown value: ${message.params.value}`);
+        return;
+      }
+      if (scenario === "no-set-support") {
+        fail(message.id, -32601, "Method not found: session/set_config_option");
+        return;
+      }
+      const { configId, value } = message.params;
+      if (configId === "model") state.model = value;
+      if (configId === "thinking") state.thinking = value;
+      // Kimi notifies *and* answers with a fresh snapshot for the same set. The
+      // relay has to recognise the notification as its own echo.
+      update({ sessionUpdate: "config_option_update", configOptions: configOptions() });
+      respond(message.id, { configOptions: configOptions() });
+      return;
+    }
     case "session/prompt":
       void runPrompt(message.id);
       return;

@@ -123,3 +123,64 @@ void test("reconcileOrphans fails a queued task whose spawned worker died before
   assert.equal((await service.get(queuedDeadWorker.id)).status, "failed");
   assert.equal((await service.get(queuedNoOwner.id)).status, "queued"); // no owner yet, left alone
 });
+
+void test("a requested model and effort survive to the persisted record", async (t) => {
+  // Background tasks are executed by a detached worker that re-reads the record
+  // from disk, so a request that lived only on the in-memory TaskRequest would
+  // be silently dropped for every background run -- which is the default.
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-svc-config-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const service = new TaskService(config(dataDir));
+
+  const record = await service.start({
+    kind: "review",
+    prompt: "review the changes",
+    projectDir: dataDir,
+    background: true,
+    model: "  kimi-code/k3  ",
+    thinkingEffort: "max",
+  });
+
+  const persisted = await new TaskStore(dataDir).get(record.id);
+  assert.equal(persisted.model, "kimi-code/k3");
+  assert.equal(persisted.thinkingEffort, "max");
+});
+
+void test("a blank configuration request is treated as absent, not as an empty value", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-svc-blank-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const service = new TaskService(config(dataDir));
+
+  const record = await service.start({
+    kind: "review",
+    prompt: "review the changes",
+    projectDir: dataDir,
+    background: true,
+    model: "   ",
+    thinkingEffort: "",
+  });
+
+  assert.equal(record.model, undefined);
+  assert.equal(record.thinkingEffort, undefined);
+});
+
+void test("a configuration request carrying a control character or padding is rejected", async (t) => {
+  // These strings are echoed into warnings and progress events that end up in a
+  // JSON task record, so a newline would let a caller forge a line in the log.
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-svc-bad-config-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const service = new TaskService(config(dataDir));
+  const request = {
+    kind: "review",
+    prompt: "review the changes",
+    projectDir: dataDir,
+    background: true,
+  } as const;
+
+  await assert.rejects(service.start({ ...request, model: "k3\nWarning: all clear" }), {
+    code: "INVALID_AGENT_CONFIG",
+  });
+  await assert.rejects(service.start({ ...request, thinkingEffort: "x".repeat(201) }), {
+    code: "INVALID_AGENT_CONFIG",
+  });
+});
