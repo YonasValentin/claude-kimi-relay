@@ -6,7 +6,7 @@ A security and correctness audit was applied on 2026-07-23 (see the CHANGELOG ha
 
 ## Passed on the release machine
 
-- `npm install` with a committed `package-lock.json`; `npm audit` reports **0 vulnerabilities** (an npm `override` pins `@hono/node-server` to `^2.0.11` because the relay only uses MCP stdio transport, and SDK 1.29's `^1.19.9` range is flagged by GHSA-frvp-7c67-39w9; the 2.x exports used by the SDK, `serve` and `getRequestListener`, are unchanged).
+- `npm install` with a committed `package-lock.json`; `npm audit` reports **0 vulnerabilities** (an npm `override` pins `@hono/node-server` to `^2.0.11` because the relay only uses MCP stdio transport, and SDK 1.29's `^1.19.9` range is flagged by GHSA-frvp-7c67-39w9; the 2.x exports used by the SDK, `serve` and `getRequestListener`, are unchanged). GHSA-mh99-v99m-4gvg in `brace-expansion` was cleared by upgrading the dev toolchain — `eslint` 10, `eslint-plugin-security` 4, `c8` 12 — rather than by an override: only `brace-expansion` 5.0.8 is unaffected, no backport exists for the 1.x or 2.x lines that `minimatch` depends on, and forcing 5.x on them breaks their CommonJS entry point (`expand is not a function`) in a way that surfaces only on patterns that actually contain braces.
 - `npm run verify` — Prettier, ESLint (`strictTypeChecked` + `eslint-plugin-security`, zero warnings), strict `tsc --noEmit`, the `tests/` suite with 0 failures, and a clean `tsc` + esbuild plugin bundle build.
 - Permission-policy tests for review writes, publication, network tools, dependency installation, and commits.
 - Filesystem tests for lexical traversal, symlink escape, secret paths, safe nested writes, and absolute paths through a symlinked workspace root (for example `/tmp` on macOS).
