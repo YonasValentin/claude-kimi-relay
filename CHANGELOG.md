@@ -4,6 +4,14 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+### Added
+
+- The relay now counts the tool calls an agent announced against the approvals it requested, and warns on the result when it ran tools the deny-first policy was never consulted about. Whether an agent asks for approval is the agent's decision: Kimi's `auto` and `yolo` session modes stop asking entirely -- its own documentation calls that "those modes' explicit contract" -- and the mode can be preset with `default_permission_mode` in `~/.kimi-code/config.toml`, which every relayed session inherits. The relay cannot prevent that, so it detects and discloses it instead. The check compares totals at the end of a run, because a tool call is announced _before_ its permission request; deciding at the first tool call would report a bypass on every correctly gated run. It uses no agent-specific mode names, which are server-driven and documented as changeable.
+
+### Changed
+
+- THREAT_MODEL.md, SECURITY.md and README.md no longer claim the permission policy applies to every tool call. It applies to the ones the agent asks about, and the relay now says when that was none of them.
+
 ## [0.4.0] - 2026-07-27
 
 ### Fixed

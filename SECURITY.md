@@ -9,7 +9,8 @@ Claude Kimi Relay assumes that a local coding agent is powerful and fallible. It
 - records the user's existing work as the current baseline and returns only later Kimi changes;
 - never lets Kimi edit the original project directly;
 - mediates ACP file reads and writes with canonical path, symlink, size, and secret-path checks;
-- applies a deny-first permission policy to review tasks and a restricted policy to delegate tasks;
+- applies a deny-first permission policy to review tasks and a restricted policy to delegate tasks, for every tool call the agent asks about;
+- counts the tool calls an agent announced against the approvals it requested, and reports on the result when it ran tools the policy was never consulted about — an agent configured to auto-approve is something the relay can detect and disclose, not prevent;
 - denies common credential access, remote Git writes, commits, publishing, dependency installation, network utilities, deployment, privilege escalation, and destructive commands;
 - sanitizes the environment inherited by the Kimi process;
 - reports the agent, model, and reasoning level that produced each result, exactly as the agent stated them, along with the names of any environment variables that could have overridden them;

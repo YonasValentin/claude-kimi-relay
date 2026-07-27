@@ -69,6 +69,11 @@ function extractProgress(update: unknown): string | undefined {
   return undefined;
 }
 
+function isToolCall(update: unknown): boolean {
+  if (typeof update !== "object" || update === null) return false;
+  return (update as Record<string, unknown>).sessionUpdate === "tool_call";
+}
+
 // Variables the agent's own documentation says override which model answers,
 // how hard it reasons, which endpoint receives the request, or where its
 // configuration and credentials live. Only their names are ever reported --
@@ -173,6 +178,40 @@ export class KimiAcpClient {
     const configOutcomes: AgentConfigRequestOutcome[] = [];
     const envOverrides = environmentOverrides(agentEnv);
     let resultBytes = 0;
+    // The deny-first policy only applies to tool calls the agent actually asks
+    // about, and whether it asks is the agent's decision, not the relay's. Kimi
+    // 0.29.0 stops asking entirely in its "auto" and "yolo" session modes -- its
+    // own documentation calls that "those modes' explicit contract" -- and the
+    // mode can be preset in the user's kimi config, so a relayed task can run
+    // with the policy never consulted. Counting both sides is the only
+    // agent-agnostic way to notice: it needs no knowledge of an agent's mode
+    // names, which are server-driven and documented as changeable.
+    //
+    // The comparison has to be made on totals at the end of the run. The tool
+    // call is announced BEFORE its permission request (verified against Kimi
+    // 0.29.0: the ordered timeline for one gated command is tool_call, then
+    // session/request_permission), so deciding at the first tool call would
+    // report a bypass on every correctly gated run.
+    let permissionRequests = 0;
+    let toolCalls = 0;
+    // Kept in run() scope so the failure path can report them too: a run that
+    // executed ungated tool calls and then timed out is exactly as worth
+    // knowing about as one that finished.
+    let reportAgent: { readonly name: string; readonly version: string } | undefined;
+    let reportState: readonly ConfigOptionState[] = [];
+    let reportChanged = false;
+
+    const recordUngatedToolCalls = (): void => {
+      if (toolCalls === 0 || permissionRequests > 0) return;
+      const sessionMode = reportState.find((option) => option.category === "mode")?.currentValue;
+      configWarnings.push(
+        `Kimi ran ${toolCalls} tool call${toolCalls === 1 ? "" : "s"} without asking this relay to approve any of them, so the deny-first command policy never ran.` +
+          (sessionMode === undefined
+            ? ""
+            : ` The agent reported its session mode as "${sessionMode}".`) +
+          " Whether an agent asks is the agent's own decision; treat this result as produced without the relay's command controls.",
+      );
+    };
 
     const buildReport = (
       agent: { readonly name: string; readonly version: string } | undefined,
@@ -193,12 +232,8 @@ export class KimiAcpClient {
       };
     };
 
-    const publishReport = (
-      agent: { readonly name: string; readonly version: string } | undefined,
-      state: readonly ConfigOptionState[],
-      changedDuringRun: boolean,
-    ): void => {
-      const agentConfig = buildReport(agent, state, changedDuringRun);
+    const publishReport = (): void => {
+      const agentConfig = buildReport(reportAgent, reportState, reportChanged);
       if (agentConfig !== undefined) onReport({ agentConfig, warnings: [...configWarnings] });
     };
     const mode = request.kind === "delegate" ? "delegate" : "review";
@@ -234,6 +269,7 @@ export class KimiAcpClient {
       const protocolResult = acp
         .client({ name: "claude-kimi-relay" })
         .onRequest(acp.methods.client.session.requestPermission, (ctx) => {
+          permissionRequests += 1;
           const decision = this.policy.decide(ctx.params as PermissionRequestLike, {
             mode,
             workspaceDir: request.workspaceDir,
@@ -347,7 +383,9 @@ export class KimiAcpClient {
             // Published before the prompt is sent, so a run that later times out
             // or is cancelled -- which reaches the caller as a throw, carrying
             // nothing -- can still say what it was running as.
-            publishReport(agent, tracker.state, false);
+            reportAgent = agent;
+            reportState = tracker.state;
+            publishReport();
 
             void session.prompt(request.prompt);
             for (;;) {
@@ -371,6 +409,7 @@ export class KimiAcpClient {
                 }
                 chunks.push(text);
               }
+              if (isToolCall(message.notification.update)) toolCalls += 1;
               const progress = extractProgress(message.notification.update);
               if (progress !== undefined) await onProgress(progress);
               // An agent may switch model or reasoning level mid-turn, for
@@ -379,7 +418,9 @@ export class KimiAcpClient {
               const configChange = tracker.observe(message.notification.update);
               if (configChange !== undefined) {
                 await onProgress(configChange);
-                publishReport(agent, tracker.state, tracker.changedDuringRun);
+                reportState = tracker.state;
+                reportChanged = tracker.changedDuringRun;
+                publishReport();
               }
             }
           });
@@ -387,6 +428,7 @@ export class KimiAcpClient {
 
       const result = await Promise.race([protocolResult, childFailure]);
       protocolFinished = true;
+      recordUngatedToolCalls();
       const agentConfig = buildReport(
         result.agent,
         result.tracker.state,
@@ -400,6 +442,11 @@ export class KimiAcpClient {
         warnings: configWarnings,
       };
     } catch (error) {
+      // The counters are meaningful even when the run did not finish: a task
+      // that executed ungated tool calls and then timed out is exactly as worth
+      // knowing about as one that completed.
+      recordUngatedToolCalls();
+      publishReport();
       if (controller.signal.aborted) {
         const reason = externalSignal?.aborted ? "cancelled" : "timed out";
         throw new RelayError(

@@ -32118,6 +32118,10 @@ function extractProgress(update) {
   if (record2.sessionUpdate === "plan") return "Kimi updated its plan.";
   return void 0;
 }
+function isToolCall(update) {
+  if (typeof update !== "object" || update === null) return false;
+  return update.sessionUpdate === "tool_call";
+}
 function environmentOverrides(env) {
   return Object.keys(env).filter((key) => key.startsWith("KIMI_MODEL_") || key === "KIMI_CODE_HOME").sort();
 }
@@ -32188,6 +32192,18 @@ var KimiAcpClient = class {
     const configOutcomes = [];
     const envOverrides = environmentOverrides(agentEnv);
     let resultBytes = 0;
+    let permissionRequests = 0;
+    let toolCalls = 0;
+    let reportAgent;
+    let reportState = [];
+    let reportChanged = false;
+    const recordUngatedToolCalls = () => {
+      if (toolCalls === 0 || permissionRequests > 0) return;
+      const sessionMode = reportState.find((option) => option.category === "mode")?.currentValue;
+      configWarnings.push(
+        `Kimi ran ${toolCalls} tool call${toolCalls === 1 ? "" : "s"} without asking this relay to approve any of them, so the deny-first command policy never ran.` + (sessionMode === void 0 ? "" : ` The agent reported its session mode as "${sessionMode}".`) + " Whether an agent asks is the agent's own decision; treat this result as produced without the relay's command controls."
+      );
+    };
     const buildReport = (agent, state, changedDuringRun) => {
       const options = toConfigSnapshot(state);
       if (options.length === 0 && agent === void 0) return void 0;
@@ -32200,8 +32216,8 @@ var KimiAcpClient = class {
         ...changedDuringRun ? { changedDuringRun: true } : {}
       };
     };
-    const publishReport = (agent, state, changedDuringRun) => {
-      const agentConfig = buildReport(agent, state, changedDuringRun);
+    const publishReport = () => {
+      const agentConfig = buildReport(reportAgent, reportState, reportChanged);
       if (agentConfig !== void 0) onReport({ agentConfig, warnings: [...configWarnings] });
     };
     const mode = request.kind === "delegate" ? "delegate" : "review";
@@ -32230,6 +32246,7 @@ ${diagnostic}` : ""}`,
     });
     try {
       const protocolResult = client({ name: "claude-kimi-relay" }).onRequest(methods.client.session.requestPermission, (ctx) => {
+        permissionRequests += 1;
         const decision = this.policy.decide(ctx.params, {
           mode,
           workspaceDir: request.workspaceDir
@@ -32320,7 +32337,9 @@ ${diagnostic}` : ""}`,
             summarizeConfigOptions(tracker.state) || void 0
           ].filter((part) => part !== void 0);
           await onProgress(`${introduction.join(" | ")}.`);
-          publishReport(agent, tracker.state, false);
+          reportAgent = agent;
+          reportState = tracker.state;
+          publishReport();
           void session.prompt(request.prompt);
           for (; ; ) {
             const message = await session.nextUpdate();
@@ -32343,18 +32362,22 @@ ${diagnostic}` : ""}`,
               }
               chunks.push(text2);
             }
+            if (isToolCall(message.notification.update)) toolCalls += 1;
             const progress = extractProgress(message.notification.update);
             if (progress !== void 0) await onProgress(progress);
             const configChange = tracker.observe(message.notification.update);
             if (configChange !== void 0) {
               await onProgress(configChange);
-              publishReport(agent, tracker.state, tracker.changedDuringRun);
+              reportState = tracker.state;
+              reportChanged = tracker.changedDuringRun;
+              publishReport();
             }
           }
         });
       });
       const result = await Promise.race([protocolResult, childFailure]);
       protocolFinished = true;
+      recordUngatedToolCalls();
       const agentConfig = buildReport(
         result.agent,
         result.tracker.state,
@@ -32368,6 +32391,8 @@ ${diagnostic}` : ""}`,
         warnings: configWarnings
       };
     } catch (error40) {
+      recordUngatedToolCalls();
+      publishReport();
       if (controller.signal.aborted) {
         const reason = externalSignal?.aborted ? "cancelled" : "timed out";
         throw new RelayError(
