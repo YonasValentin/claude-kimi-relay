@@ -248,6 +248,166 @@ export function setRequestBody(configId: string, value: string): Record<string, 
   return { configId, value };
 }
 
+/** A caller's request for one configuration option. */
+export interface ConfigRequest {
+  readonly target: ConfigTarget;
+  /** How to name this option in a warning, for example "model". */
+  readonly label: string;
+  readonly requested: string;
+}
+
+/** What became of one request, structured so a caller need not read prose. */
+export interface ConfigRequestOutcome {
+  readonly configId: string;
+  readonly requested: string;
+  readonly applied: boolean;
+  readonly effectiveValue?: string;
+  readonly detail?: string;
+}
+
+export interface AppliedConfig {
+  readonly state: readonly ConfigOptionState[];
+  readonly outcomes: readonly ConfigRequestOutcome[];
+  readonly warnings: readonly string[];
+}
+
+/** Sends one `session/set_config_option` and resolves with the response's `configOptions`. */
+export type SetConfigOption = (configId: string, value: string) => Promise<unknown>;
+
+const METHOD_NOT_FOUND = -32601;
+
+function errorCode(error: unknown): number | undefined {
+  const record = asRecord(error);
+  return typeof record?.code === "number" ? record.code : undefined;
+}
+
+function errorDetail(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = errorCode(error);
+  return code === undefined ? message : `${message} (JSON-RPC ${code})`;
+}
+
+/**
+ * Applies configuration requests against a live session.
+ *
+ * Requests are applied strictly in the order given, one at a time, and the whole
+ * option state is rebuilt from each response before the next request resolves.
+ * That order matters: the agent may rewrite one option's legal values when
+ * another changes -- selecting a model that cannot reason removes the effort
+ * option outright -- so callers must pass the model request before the effort
+ * request. The spec defines no semantics for concurrent set calls, so they are
+ * never issued in parallel.
+ *
+ * No failure here fails the task. A review that ran at the agent's own default
+ * and found a real defect is still a good review; losing it because an optional
+ * knob would not turn is not a trade worth making.
+ */
+export async function applyConfigRequests(
+  initial: unknown,
+  requests: readonly ConfigRequest[],
+  setOption: SetConfigOption,
+): Promise<AppliedConfig> {
+  let state = parseConfigOptions(initial);
+  const outcomes: ConfigRequestOutcome[] = [];
+  const warnings: string[] = [];
+  const sent = new Map<string, string>();
+  let unsupported = false;
+
+  for (const request of requests) {
+    const { label, requested } = request;
+    const fallbackId = request.target.ids[0] ?? label;
+    if (unsupported) {
+      outcomes.push({
+        configId: fallbackId,
+        requested,
+        applied: false,
+        detail: "The agent does not support session/set_config_option.",
+      });
+      continue;
+    }
+
+    const resolution = resolveConfigRequest(state, request.target, requested);
+    switch (resolution.kind) {
+      case "no_option": {
+        const detail = `Kimi advertised no ${label} option, so the requested ${label} "${requested}" was ignored and the task ran at the agent's own default.`;
+        warnings.push(detail);
+        outcomes.push({ configId: fallbackId, requested, applied: false, detail });
+        break;
+      }
+      case "ambiguous": {
+        // Picking one would be a guess about which knob the user meant, and the
+        // spec is explicit that categories carry no correctness guarantee.
+        const detail = `Kimi advertised more than one ${label} option (${resolution.configIds.join(", ")}), so the requested ${label} "${requested}" was ignored rather than guessed at.`;
+        warnings.push(detail);
+        outcomes.push({ configId: fallbackId, requested, applied: false, detail });
+        break;
+      }
+      case "not_offered": {
+        const offered =
+          resolution.offered.length === 0 ? "no values" : resolution.offered.join(", ");
+        const detail = `Kimi does not offer ${label} "${requested}". It offers ${offered}, and stays at "${resolution.currentValue}".`;
+        warnings.push(detail);
+        outcomes.push({ configId: resolution.configId, requested, applied: false, detail });
+        break;
+      }
+      case "already": {
+        // The agent already reports this value, and it has no idempotency check,
+        // so setting it again costs a round-trip and a spurious notification.
+        sent.set(resolution.configId, resolution.value);
+        outcomes.push({ configId: resolution.configId, requested, applied: true });
+        break;
+      }
+      case "apply": {
+        try {
+          const response = await setOption(resolution.configId, resolution.value);
+          const next = parseConfigOptions(response);
+          // The response must carry the complete state. An empty one would mean
+          // the agent contradicted itself, so the known state is kept instead of
+          // reporting a session with no options at all.
+          if (next.length > 0) state = next;
+          sent.set(resolution.configId, resolution.value);
+          outcomes.push({ configId: resolution.configId, requested, applied: true });
+        } catch (error) {
+          const detail =
+            errorCode(error) === METHOD_NOT_FOUND
+              ? `This Kimi build does not support session/set_config_option, so the requested ${label} "${requested}" was ignored.`
+              : `Kimi refused to set ${label} to "${requested}": ${errorDetail(error)}`;
+          // A missing method is missing for every request, so stop asking.
+          if (errorCode(error) === METHOD_NOT_FOUND) unsupported = true;
+          warnings.push(detail);
+          outcomes.push({ configId: resolution.configId, requested, applied: false, detail });
+        }
+        break;
+      }
+    }
+  }
+
+  // Only now can a value applied earlier be checked against the final state: a
+  // later set can remap it, and the agent may accept a value but report a
+  // different effective one.
+  for (const [configId, value] of sent) {
+    const option = state.find((candidate) => candidate.id === configId);
+    if (option === undefined) {
+      warnings.push(
+        `Kimi no longer offers the "${configId}" option after the other settings were applied, so "${value}" is not in effect.`,
+      );
+    } else if (option.currentValue !== value) {
+      warnings.push(
+        `Kimi reports ${option.label}="${option.currentValue}" after the other settings were applied, not the requested "${value}".`,
+      );
+    }
+  }
+
+  return {
+    state,
+    outcomes: outcomes.map((outcome) => {
+      const option = state.find((candidate) => candidate.id === outcome.configId);
+      return option === undefined ? outcome : { ...outcome, effectiveValue: option.currentValue };
+    }),
+    warnings,
+  };
+}
+
 /** Tracks the agent's option state across a run and narrates changes to it. */
 export class ConfigTracker {
   private current: readonly ConfigOptionState[];
