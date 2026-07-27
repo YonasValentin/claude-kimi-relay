@@ -124,21 +124,39 @@ void test("reconcileOrphans fails a queued task whose spawned worker died before
   assert.equal((await service.get(queuedNoOwner.id)).status, "queued"); // no owner yet, left alone
 });
 
+// The record is written before the worker is spawned, so a project directory
+// that cannot exist exercises persistence while making the worker die on its
+// own. Leaving a live worker behind would hold the temp directory open, which
+// Windows reports as EBUSY when the test cleans up -- and would leave a real
+// Kimi task running on a CI machine.
+async function settle(service: TaskService, id: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  let latest = await service.get(id);
+  while (!["completed", "failed", "cancelled", "timed_out"].includes(latest.status)) {
+    if (Date.now() > deadline) return;
+    await delay(50);
+    latest = await service.get(id);
+  }
+}
+
 void test("a requested model and effort survive to the persisted record", async (t) => {
   // Background tasks are executed by a detached worker that re-reads the record
   // from disk, so a request that lived only on the in-memory TaskRequest would
   // be silently dropped for every background run -- which is the default.
   const dataDir = await mkdtemp(join(tmpdir(), "relay-svc-config-"));
-  t.after(() => rm(dataDir, { recursive: true, force: true }));
   const service = new TaskService(config(dataDir));
 
   const record = await service.start({
     kind: "review",
     prompt: "review the changes",
-    projectDir: dataDir,
+    projectDir: join(dataDir, "does-not-exist"),
     background: true,
     model: "  kimi-code/k3  ",
     thinkingEffort: "max",
+  });
+  t.after(async () => {
+    await settle(service, record.id);
+    await rm(dataDir, { recursive: true, force: true });
   });
 
   const persisted = await new TaskStore(dataDir).get(record.id);
@@ -148,16 +166,19 @@ void test("a requested model and effort survive to the persisted record", async 
 
 void test("a blank configuration request is treated as absent, not as an empty value", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "relay-svc-blank-"));
-  t.after(() => rm(dataDir, { recursive: true, force: true }));
   const service = new TaskService(config(dataDir));
 
   const record = await service.start({
     kind: "review",
     prompt: "review the changes",
-    projectDir: dataDir,
+    projectDir: join(dataDir, "does-not-exist"),
     background: true,
     model: "   ",
     thinkingEffort: "",
+  });
+  t.after(async () => {
+    await settle(service, record.id);
+    await rm(dataDir, { recursive: true, force: true });
   });
 
   assert.equal(record.model, undefined);
