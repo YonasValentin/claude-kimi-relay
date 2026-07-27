@@ -123,3 +123,85 @@ void test("reconcileOrphans fails a queued task whose spawned worker died before
   assert.equal((await service.get(queuedDeadWorker.id)).status, "failed");
   assert.equal((await service.get(queuedNoOwner.id)).status, "queued"); // no owner yet, left alone
 });
+
+// The record is written before the worker is spawned, so a project directory
+// that cannot exist exercises persistence while making the worker die on its
+// own. Leaving a live worker behind would hold the temp directory open, which
+// Windows reports as EBUSY when the test cleans up -- and would leave a real
+// Kimi task running on a CI machine.
+async function settle(service: TaskService, id: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  let latest = await service.get(id);
+  while (!["completed", "failed", "cancelled", "timed_out"].includes(latest.status)) {
+    if (Date.now() > deadline) return;
+    await delay(50);
+    latest = await service.get(id);
+  }
+}
+
+void test("a requested model and effort survive to the persisted record", async (t) => {
+  // Background tasks are executed by a detached worker that re-reads the record
+  // from disk, so a request that lived only on the in-memory TaskRequest would
+  // be silently dropped for every background run -- which is the default.
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-svc-config-"));
+  const service = new TaskService(config(dataDir));
+
+  const record = await service.start({
+    kind: "review",
+    prompt: "review the changes",
+    projectDir: join(dataDir, "does-not-exist"),
+    background: true,
+    model: "  kimi-code/k3  ",
+    thinkingEffort: "max",
+  });
+  t.after(async () => {
+    await settle(service, record.id);
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const persisted = await new TaskStore(dataDir).get(record.id);
+  assert.equal(persisted.model, "kimi-code/k3");
+  assert.equal(persisted.thinkingEffort, "max");
+});
+
+void test("a blank configuration request is treated as absent, not as an empty value", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-svc-blank-"));
+  const service = new TaskService(config(dataDir));
+
+  const record = await service.start({
+    kind: "review",
+    prompt: "review the changes",
+    projectDir: join(dataDir, "does-not-exist"),
+    background: true,
+    model: "   ",
+    thinkingEffort: "",
+  });
+  t.after(async () => {
+    await settle(service, record.id);
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  assert.equal(record.model, undefined);
+  assert.equal(record.thinkingEffort, undefined);
+});
+
+void test("a configuration request carrying a control character or padding is rejected", async (t) => {
+  // These strings are echoed into warnings and progress events that end up in a
+  // JSON task record, so a newline would let a caller forge a line in the log.
+  const dataDir = await mkdtemp(join(tmpdir(), "relay-svc-bad-config-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const service = new TaskService(config(dataDir));
+  const request = {
+    kind: "review",
+    prompt: "review the changes",
+    projectDir: dataDir,
+    background: true,
+  } as const;
+
+  await assert.rejects(service.start({ ...request, model: "k3\nWarning: all clear" }), {
+    code: "INVALID_AGENT_CONFIG",
+  });
+  await assert.rejects(service.start({ ...request, thinkingEffort: "x".repeat(201) }), {
+    code: "INVALID_AGENT_CONFIG",
+  });
+});

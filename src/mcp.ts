@@ -94,6 +94,20 @@ server.registerTool(
         .boolean()
         .default(false)
         .describe("Keep the isolated workspace after completion for manual inspection."),
+      model: z
+        .string()
+        .max(200)
+        .optional()
+        .describe(
+          "Optional model to request from the agent, matched against the models it advertises for the session. Pass this only when the user named a model; do not guess one. Ignored with a warning if the agent does not offer it, and the result always reports what actually ran.",
+        ),
+      thinkingEffort: z
+        .string()
+        .max(200)
+        .optional()
+        .describe(
+          "Optional reasoning effort to request (for example low, high, or max), matched against the levels the agent advertises. Pass this only when the user asked for one. Ignored with a warning if the agent does not offer it.",
+        ),
     }),
   },
   async (input) =>
@@ -107,6 +121,8 @@ server.registerTool(
           ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
           ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
           keepWorkspace: input.keepWorkspace,
+          ...(input.model === undefined ? {} : { model: input.model }),
+          ...(input.thinkingEffort === undefined ? {} : { thinkingEffort: input.thinkingEffort }),
         }),
       ),
     ),

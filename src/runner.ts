@@ -136,6 +136,10 @@ export class TaskRunner {
             prompt: buildPrompt(record.kind, record.prompt, prepared.diffIsEmpty),
             workspaceDir: prepared.path,
             timeoutMs: record.timeoutMs,
+            ...(record.model === undefined ? {} : { model: record.model }),
+            ...(record.thinkingEffort === undefined
+              ? {}
+              : { thinkingEffort: record.thinkingEffort }),
           },
           async (message) => {
             progressCount += 1;
@@ -172,6 +176,9 @@ export class TaskRunner {
             sessionId: agentResult.sessionId,
             ...(patchPath === undefined ? {} : { patchPath }),
             ...(record.keepWorkspace ? { workspacePath: prepared.path } : {}),
+            ...(agentResult.agentConfig === undefined
+              ? {}
+              : { agentConfig: agentResult.agentConfig }),
             warnings: [...prepared.warnings, ...agentResult.warnings],
           },
           events: capEvents([

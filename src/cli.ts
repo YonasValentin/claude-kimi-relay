@@ -22,6 +22,8 @@ function usage(): never {
 Commands:
   doctor
   start --kind review|challenge|delegate --prompt "..." [--project .] [--background]
+        [--base ref] [--timeout-ms 1800000] [--keep-workspace]
+        [--model <id>] [--thinking-effort <level>]
   status <task-id>
   result <task-id>
   list [--limit 20]
@@ -51,6 +53,10 @@ async function main(): Promise<void> {
       if (kind === undefined || prompt === undefined) usage();
       const timeoutFlag = flag(args, "--timeout-ms");
       const base = flag(args, "--base");
+      // Passed through unchecked on purpose: validateRequest is the authoritative
+      // gate, and it is the only one this path has.
+      const model = flag(args, "--model");
+      const thinkingEffort = flag(args, "--thinking-effort");
       const record = await service.start({
         kind,
         prompt,
@@ -60,6 +66,8 @@ async function main(): Promise<void> {
         ...(base === undefined ? {} : { baseRef: base }),
         ...(timeoutFlag === undefined ? {} : { timeoutMs: Number.parseInt(timeoutFlag, 10) }),
         keepWorkspace: has(args, "--keep-workspace"),
+        ...(model === undefined ? {} : { model }),
+        ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
       });
       console.log(JSON.stringify(record, null, 2));
       return;
@@ -76,6 +84,22 @@ async function main(): Promise<void> {
       const record = await service.get(id);
       console.log(record.result?.summary ?? record.error ?? `Task status: ${record.status}`);
       if (record.result?.patchPath) console.log(`\nPatch: ${record.result.patchPath}`);
+      const agentConfig = record.result?.agentConfig;
+      if (agentConfig) {
+        // Which model and reasoning level answered is part of how much weight
+        // the answer deserves, so it prints with the result rather than hiding
+        // in the JSON of `status`.
+        const agent = agentConfig.agent;
+        const parts = [
+          agent === undefined ? undefined : `${agent.name} ${agent.version}`.trim(),
+          agentConfig.summary || undefined,
+        ].filter((part) => part !== undefined);
+        if (parts.length > 0) console.log(`\nProduced by: ${parts.join(" | ")}`);
+        if (agentConfig.envOverrides?.length) {
+          console.log(`Environment overrides in effect: ${agentConfig.envOverrides.join(", ")}`);
+        }
+      }
+      for (const warning of record.result?.warnings ?? []) console.log(`\nWarning: ${warning}`);
       return;
     }
     case "list": {

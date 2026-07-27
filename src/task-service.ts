@@ -27,10 +27,28 @@ interface ValidatedTaskRequest {
   readonly baseRef: string;
   readonly timeoutMs: number;
   readonly keepWorkspace: boolean;
+  readonly model?: string;
+  readonly thinkingEffort?: string;
 }
 
 function now(): string {
   return new Date().toISOString();
+}
+
+// An agent configuration request is a lookup key, never a value on the wire: it
+// is matched against what the agent advertises for the session, so there is no
+// allowlist of models or effort levels here -- the agent's catalog is
+// server-driven and any list hardcoded in the relay would rot. What must be
+// checked is the shape. These strings are echoed into warnings and progress
+// events that end up in a JSON task record, so a control character would let a
+// caller forge a line in the log.
+function validateConfigValue(value: string | undefined, field: string): string | undefined {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || trimmed === "") return undefined;
+  if (trimmed.length > 200 || /[\0\r\n]/u.test(trimmed)) {
+    throw new RelayError(`${field} is not a valid configuration value.`, "INVALID_AGENT_CONFIG");
+  }
+  return trimmed;
 }
 
 function validateRequest(request: TaskRequest, config: RelayConfig): ValidatedTaskRequest {
@@ -55,6 +73,9 @@ function validateRequest(request: TaskRequest, config: RelayConfig): ValidatedTa
     throw new RelayError("timeoutMs must be between 10 seconds and 24 hours.", "INVALID_TIMEOUT");
   }
 
+  const model = validateConfigValue(request.model, "model");
+  const thinkingEffort = validateConfigValue(request.thinkingEffort, "thinkingEffort");
+
   return {
     kind: request.kind,
     prompt,
@@ -63,6 +84,8 @@ function validateRequest(request: TaskRequest, config: RelayConfig): ValidatedTa
     baseRef,
     timeoutMs,
     keepWorkspace: request.keepWorkspace ?? false,
+    ...(model === undefined ? {} : { model }),
+    ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
   };
 }
 
@@ -92,6 +115,8 @@ export class TaskService {
       background: input.background,
       keepWorkspace: input.keepWorkspace,
       timeoutMs: input.timeoutMs,
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.thinkingEffort === undefined ? {} : { thinkingEffort: input.thinkingEffort }),
       createdAt: at,
       updatedAt: at,
       status: "queued",

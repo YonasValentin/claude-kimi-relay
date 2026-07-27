@@ -4,6 +4,27 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+### Added
+
+- Every completed task now reports what produced it, under `result.agentConfig`: the agent's name and version from the ACP `initialize` response, and its session configuration options — model, reasoning level, mode — exactly as the agent reported them on `session/new`. A change the agent makes mid-run is folded in and flagged with `changedDuringRun`. There is deliberately no `model` field: the relay reports the agent's own option ids and values rather than claiming to know which one is the model, and an agent that advertises no configuration yields no options rather than a guess.
+- A task can request a `model` and a `thinkingEffort`, on `start_task` and as `--model` / `--thinking-effort` on the CLI. The value is matched against the options the agent advertises for that session and is never sent to it as a raw string, so the relay's outbound configuration is always a subset of what the agent offered. The model is applied before the effort, because choosing a model can rewrite the reasoning scale or remove it — a request the agent cannot honour becomes a warning and the task runs at the agent's own default rather than failing. Both values are persisted on the task record, so they survive the detached worker that executes background tasks.
+- `agentConfig.envOverrides` names — never values — the forwarded `KIMI_MODEL_*` and `KIMI_CODE_HOME` variables that Kimi's documentation says can override which model answers, how hard it reasons, which endpoint receives the request, or where its configuration lives. It is the first place to look when a task ignored what was asked of it.
+
+### Security
+
+- Upgraded the dev toolchain to clear GHSA-mh99-v99m-4gvg (`brace-expansion` denial of service, reachable through `minimatch` under ESLint and c8): `eslint` 9 → 10, `eslint-plugin-security` 3 → 4, `c8` 10 → 12. Nothing shipped in the package was affected, since it publishes only `dist/` and documentation. An npm `override` was tried first and rejected: `brace-expansion` 5.0.8 is the only unaffected release, no backport exists for the 1.x or 2.x lines `minimatch` depends on, and forcing 5.x onto them breaks their CommonJS entry point on any pattern containing braces. No lint rule changed and no source edit was needed.
+
+### Fixed
+
+- `doctor` checked Kimi with the relay's full environment while the ACP spawn sanitizes it, so a green tick could reflect a variable the real task never sees. The Kimi check now uses the same restricted environment and says so. Git deliberately keeps the full environment: it is a host diagnostic.
+- Errors raised inside the ACP protocol were re-wrapped as a generic `KIMI_ACP_FAILED`, discarding the specific code and message — the sign-in instructions for an unauthenticated agent, the versions to align on a protocol mismatch, the result-size limit. They now reach the caller intact.
+- `KIMI_EXITED` reported an exit code and discarded the agent's stderr, which is the only place a dying agent explains itself.
+
+### Changed
+
+- The review skill no longer tells Claude to fall back to `baseRef: HEAD`, which suppressed the merge-base auto-selection added in 0.2.0 and put the empty-diff case back on the table.
+- THREAT_MODEL.md and README.md now document the `KIMI_*` environment channel that the allowlist has always forwarded.
+
 ## [0.2.0] - 2026-07-24
 
 ### Security

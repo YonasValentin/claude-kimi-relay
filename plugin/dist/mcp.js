@@ -27914,6 +27914,7 @@ function sanitizedAgentEnvironment(env = process.env) {
 }
 
 // src/doctor.ts
+var RESTRICTED_ENV_NOTE = "(checked with the same restricted environment the relay gives the agent)";
 function meetsNodeFloor(version2) {
   const parts = version2.replace(/^v/u, "").split(".");
   const major = Number.parseInt(parts[0] ?? "", 10);
@@ -27921,9 +27922,13 @@ function meetsNodeFloor(version2) {
   if (!Number.isInteger(major)) return false;
   return major > 22 || major === 22 && (Number.isInteger(minor) ? minor : 0) >= 14;
 }
-async function commandCheck(name, command, args) {
+async function commandCheck(name, command, args, env) {
   try {
-    const result = await runCommand(command, args, { allowFailure: true, timeoutMs: 2e4 });
+    const result = await runCommand(command, args, {
+      allowFailure: true,
+      timeoutMs: 2e4,
+      ...env === void 0 ? {} : { env }
+    });
     return {
       name,
       ok: result.exitCode === 0,
@@ -27958,7 +27963,13 @@ async function runDoctor(config3) {
     detail: `${process.version} (requires Node.js 22.14 or newer)`
   });
   checks.push(await commandCheck("Git", "git", ["--version"]));
-  checks.push(await commandCheck("Kimi Code", config3.kimiCliPath, ["--version"]));
+  const kimi = await commandCheck(
+    "Kimi Code",
+    config3.kimiCliPath,
+    ["--version"],
+    sanitizedAgentEnvironment()
+  );
+  checks.push({ ...kimi, detail: `${kimi.detail} ${RESTRICTED_ENV_NOTE}` });
   checks.push(await stateDirectoryCheck(config3));
   return checks;
 }
@@ -31827,6 +31838,264 @@ var PermissionPolicy = class {
   }
 };
 
+// src/session-config.ts
+var MAX_OPTIONS = 32;
+var MAX_VALUES_PER_OPTION = 128;
+var MAX_STRING_LENGTH = 200;
+var MAX_CONFIG_CHANGE_EVENTS = 10;
+var MODEL_TARGET = { ids: ["model"], categories: ["model"] };
+var EFFORT_TARGET = { ids: ["thinking"], categories: ["thought_level"] };
+function asRecord(value) {
+  return typeof value === "object" && value !== null ? value : void 0;
+}
+function boundedString(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_STRING_LENGTH ? value : void 0;
+}
+function parseValues(input) {
+  if (!Array.isArray(input)) return [];
+  const values = [];
+  const push = (candidate) => {
+    const value = boundedString(candidate);
+    if (value !== void 0 && !values.includes(value)) values.push(value);
+  };
+  for (const entry of input) {
+    if (values.length >= MAX_VALUES_PER_OPTION) break;
+    const record2 = asRecord(entry);
+    if (record2 === void 0) continue;
+    const nested = record2.options;
+    if (Array.isArray(nested)) {
+      for (const inner of nested) {
+        if (values.length >= MAX_VALUES_PER_OPTION) break;
+        push(asRecord(inner)?.value);
+      }
+      continue;
+    }
+    push(record2.value);
+  }
+  return values;
+}
+function parseConfigOptions(input) {
+  if (!Array.isArray(input)) return [];
+  const parsed = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of input) {
+    if (parsed.length >= MAX_OPTIONS) break;
+    const record2 = asRecord(entry);
+    if (record2 === void 0) continue;
+    const id = boundedString(record2.id) ?? boundedString(record2.configId);
+    if (id === void 0 || seen.has(id)) continue;
+    let currentValue;
+    let values = [];
+    if (record2.type === "boolean") {
+      if (typeof record2.currentValue !== "boolean") continue;
+      currentValue = record2.currentValue ? "true" : "false";
+    } else if (record2.type === "select" || record2.type === void 0 || record2.type === null) {
+      currentValue = boundedString(record2.currentValue);
+      if (currentValue === void 0) continue;
+      values = parseValues(record2.options);
+    } else {
+      continue;
+    }
+    const category = boundedString(record2.category);
+    seen.add(id);
+    parsed.push({
+      id,
+      label: boundedString(record2.name) ?? id,
+      currentValue,
+      ...category === void 0 ? {} : { category },
+      values
+    });
+  }
+  return parsed;
+}
+function extractConfigOptions(update) {
+  const record2 = asRecord(update);
+  if (record2?.sessionUpdate !== "config_option_update") return void 0;
+  return parseConfigOptions(record2.configOptions);
+}
+function summarizeConfigOptions(options) {
+  return options.map((option) => `${option.label}=${option.currentValue}`).join(", ");
+}
+function toConfigSnapshot(options) {
+  return options.map(({ id, label, currentValue, category }) => ({
+    id,
+    name: label,
+    currentValue,
+    ...category === void 0 ? {} : { category }
+  }));
+}
+function describeConfigChange(before, after) {
+  const changes = [];
+  for (const option of after) {
+    const previous = before.find((candidate) => candidate.id === option.id);
+    if (previous === void 0) {
+      changes.push(`${option.label} appeared as ${option.currentValue}`);
+    } else if (previous.currentValue !== option.currentValue) {
+      changes.push(`${option.label} ${previous.currentValue} -> ${option.currentValue}`);
+    }
+  }
+  for (const option of before) {
+    if (!after.some((candidate) => candidate.id === option.id)) {
+      changes.push(`${option.label} is no longer offered`);
+    }
+  }
+  return changes.length === 0 ? void 0 : `Kimi changed its session config: ${changes.join("; ")}`;
+}
+function matchValue(values, requested) {
+  const wanted = requested.trim();
+  if (wanted === "") return void 0;
+  if (values.includes(wanted)) return wanted;
+  const folded = wanted.toLowerCase();
+  const candidates = values.filter((value) => value.toLowerCase() === folded);
+  return candidates.length === 1 ? candidates[0] : void 0;
+}
+function resolveConfigRequest(options, target, requested) {
+  const byId = options.filter((option2) => target.ids.includes(option2.id));
+  const matches = byId.length > 0 ? byId : options.filter(
+    (option2) => option2.category !== void 0 && target.categories.includes(option2.category)
+  );
+  if (matches.length === 0) return { kind: "no_option" };
+  if (matches.length > 1)
+    return { kind: "ambiguous", configIds: matches.map((option2) => option2.id) };
+  const option = matches[0];
+  if (option === void 0) return { kind: "no_option" };
+  const value = matchValue(option.values, requested);
+  if (value === void 0) {
+    return {
+      kind: "not_offered",
+      configId: option.id,
+      currentValue: option.currentValue,
+      offered: option.values
+    };
+  }
+  return { kind: value === option.currentValue ? "already" : "apply", configId: option.id, value };
+}
+function setRequestBody(configId, value) {
+  return { configId, value };
+}
+var METHOD_NOT_FOUND = -32601;
+function errorCode(error40) {
+  const record2 = asRecord(error40);
+  return typeof record2?.code === "number" ? record2.code : void 0;
+}
+function errorDetail(error40) {
+  const message = error40 instanceof Error ? error40.message : String(error40);
+  const code = errorCode(error40);
+  return code === void 0 ? message : `${message} (JSON-RPC ${code})`;
+}
+async function applyConfigRequests(initial, requests, setOption) {
+  let state = parseConfigOptions(initial);
+  const outcomes = [];
+  const warnings = [];
+  const sent = /* @__PURE__ */ new Map();
+  let unsupported = false;
+  for (const request of requests) {
+    const { label, requested } = request;
+    const fallbackId = request.target.ids[0] ?? label;
+    if (unsupported) {
+      outcomes.push({
+        configId: fallbackId,
+        requested,
+        applied: false,
+        detail: "The agent does not support session/set_config_option."
+      });
+      continue;
+    }
+    const resolution = resolveConfigRequest(state, request.target, requested);
+    switch (resolution.kind) {
+      case "no_option": {
+        const detail = `Kimi advertised no ${label} option, so the requested ${label} "${requested}" was ignored and the task ran at the agent's own default.`;
+        warnings.push(detail);
+        outcomes.push({ configId: fallbackId, requested, applied: false, detail });
+        break;
+      }
+      case "ambiguous": {
+        const detail = `Kimi advertised more than one ${label} option (${resolution.configIds.join(", ")}), so the requested ${label} "${requested}" was ignored rather than guessed at.`;
+        warnings.push(detail);
+        outcomes.push({ configId: fallbackId, requested, applied: false, detail });
+        break;
+      }
+      case "not_offered": {
+        const offered = resolution.offered.length === 0 ? "no values" : resolution.offered.join(", ");
+        const detail = `Kimi does not offer ${label} "${requested}". It offers ${offered}, and stays at "${resolution.currentValue}".`;
+        warnings.push(detail);
+        outcomes.push({ configId: resolution.configId, requested, applied: false, detail });
+        break;
+      }
+      case "already": {
+        sent.set(resolution.configId, resolution.value);
+        outcomes.push({ configId: resolution.configId, requested, applied: true });
+        break;
+      }
+      case "apply": {
+        try {
+          const response = await setOption(resolution.configId, resolution.value);
+          const next = parseConfigOptions(asRecord(response)?.configOptions);
+          if (next.length > 0) state = next;
+          sent.set(resolution.configId, resolution.value);
+          outcomes.push({ configId: resolution.configId, requested, applied: true });
+        } catch (error40) {
+          const detail = errorCode(error40) === METHOD_NOT_FOUND ? `This Kimi build does not support session/set_config_option, so the requested ${label} "${requested}" was ignored.` : `Kimi refused to set ${label} to "${requested}": ${errorDetail(error40)}`;
+          if (errorCode(error40) === METHOD_NOT_FOUND) unsupported = true;
+          warnings.push(detail);
+          outcomes.push({ configId: resolution.configId, requested, applied: false, detail });
+        }
+        break;
+      }
+    }
+  }
+  for (const [configId, value] of sent) {
+    const option = state.find((candidate) => candidate.id === configId);
+    if (option === void 0) {
+      warnings.push(
+        `Kimi no longer offers the "${configId}" option after the other settings were applied, so "${value}" is not in effect.`
+      );
+    } else if (option.currentValue !== value) {
+      warnings.push(
+        `Kimi reports ${option.label}="${option.currentValue}" after the other settings were applied, not the requested "${value}".`
+      );
+    }
+  }
+  return {
+    state,
+    outcomes: outcomes.map((outcome) => {
+      const option = state.find((candidate) => candidate.id === outcome.configId);
+      return option === void 0 ? outcome : { ...outcome, effectiveValue: option.currentValue };
+    }),
+    warnings
+  };
+}
+var ConfigTracker = class {
+  current;
+  emitted = 0;
+  changed = false;
+  constructor(initial) {
+    this.current = initial;
+  }
+  get state() {
+    return this.current;
+  }
+  get changedDuringRun() {
+    return this.changed;
+  }
+  /**
+   * Folds a session update into the tracked state, returning a line to report
+   * when it changed something worth telling the user about.
+   */
+  observe(update) {
+    const next = extractConfigOptions(update);
+    if (next === void 0) return void 0;
+    if (next.length === 0) return void 0;
+    const description = describeConfigChange(this.current, next);
+    this.current = next;
+    if (description === void 0) return void 0;
+    this.changed = true;
+    if (this.emitted >= MAX_CONFIG_CHANGE_EVENTS) return void 0;
+    this.emitted += 1;
+    return description;
+  }
+};
+
 // src/version.ts
 var VERSION = "0.2.0";
 
@@ -31848,6 +32117,15 @@ function extractProgress(update) {
   }
   if (record2.sessionUpdate === "plan") return "Kimi updated its plan.";
   return void 0;
+}
+function environmentOverrides(env) {
+  return Object.keys(env).filter((key) => key.startsWith("KIMI_MODEL_") || key === "KIMI_CODE_HOME").sort();
+}
+function readAgentInfo(info) {
+  if (typeof info !== "object" || info === null) return void 0;
+  const record2 = info;
+  if (typeof record2.name !== "string") return void 0;
+  return { name: record2.name, version: typeof record2.version === "string" ? record2.version : "" };
 }
 var TERMINATE_GRACE_MS = 2e3;
 function signalChild(child, signal, group) {
@@ -31882,9 +32160,10 @@ var KimiAcpClient = class {
     const onExternalAbort = () => controller.abort();
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs);
-    const child = spawn2(this.config.kimiCliPath, ["acp"], {
+    const agentEnv = sanitizedAgentEnvironment();
+    const child = spawn2(this.config.kimiCliPath, [...this.config.kimiCliArgs ?? ["acp"]], {
       cwd: request.workspaceDir,
-      env: sanitizedAgentEnvironment(),
+      env: agentEnv,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       signal: controller.signal,
@@ -31905,6 +32184,8 @@ var KimiAcpClient = class {
     const input = Readable.toWeb(child.stdout);
     const stream = ndJsonStream2(output, input);
     const chunks = [];
+    const configWarnings = [];
+    const configOutcomes = [];
     let resultBytes = 0;
     const mode = request.kind === "delegate" ? "delegate" : "review";
     let protocolFinished = false;
@@ -31920,9 +32201,11 @@ var KimiAcpClient = class {
       });
       child.once("exit", (code, signal) => {
         if (protocolFinished || controller.signal.aborted) return;
+        const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
         reject(
           new RelayError(
-            `Kimi Code exited before ACP completed (${signal ?? `exit ${code ?? "unknown"}`}).`,
+            `Kimi Code exited before ACP completed (${signal ?? `exit ${code ?? "unknown"}`}).${diagnostic ? `
+${diagnostic}` : ""}`,
             "KIMI_EXITED"
           )
         );
@@ -31985,15 +32268,50 @@ var KimiAcpClient = class {
             "ACP_VERSION_MISMATCH"
           );
         }
+        const agent = readAgentInfo(initializeResponse.agentInfo);
         return ctx.buildSession(request.workspaceDir).withSession(async (session) => {
-          await onProgress(`Kimi ACP session ${session.sessionId} started.`);
+          const configRequests = [];
+          if (request.model !== void 0) {
+            configRequests.push({
+              target: MODEL_TARGET,
+              label: "model",
+              requested: request.model
+            });
+          }
+          if (request.thinkingEffort !== void 0) {
+            configRequests.push({
+              target: EFFORT_TARGET,
+              label: "thinking effort",
+              requested: request.thinkingEffort
+            });
+          }
+          const applied = await applyConfigRequests(
+            session.newSessionResponse.configOptions,
+            configRequests,
+            async (configId, value) => ctx.request(methods.agent.session.setConfigOption, {
+              sessionId: session.sessionId,
+              ...setRequestBody(configId, value)
+            })
+          );
+          configWarnings.push(...applied.warnings);
+          configOutcomes.push(...applied.outcomes);
+          for (const warning of applied.warnings) await onProgress(warning);
+          const tracker = new ConfigTracker(applied.state);
+          const introduction = [
+            `Kimi ACP session ${session.sessionId} started`,
+            agent === void 0 ? void 0 : `${agent.name} ${agent.version}`.trim(),
+            summarizeConfigOptions(tracker.state) || void 0
+          ].filter((part) => part !== void 0);
+          await onProgress(`${introduction.join(" | ")}.`);
           void session.prompt(request.prompt);
           for (; ; ) {
             const message = await session.nextUpdate();
             if (message.kind === "stop") {
               return {
                 response: message.response,
-                sessionId: session.sessionId
+                sessionId: session.sessionId,
+                agent,
+                tracker
               };
             }
             const text2 = extractText(message.notification.update);
@@ -32009,16 +32327,29 @@ var KimiAcpClient = class {
             }
             const progress = extractProgress(message.notification.update);
             if (progress !== void 0) await onProgress(progress);
+            const configChange = tracker.observe(message.notification.update);
+            if (configChange !== void 0) await onProgress(configChange);
           }
         });
       });
       const result = await Promise.race([protocolResult, childFailure]);
       protocolFinished = true;
+      const envOverrides = environmentOverrides(agentEnv);
+      const options = toConfigSnapshot(result.tracker.state);
+      const agentConfig = options.length === 0 && result.agent === void 0 ? void 0 : {
+        summary: summarizeConfigOptions(result.tracker.state),
+        options,
+        ...result.agent === void 0 ? {} : { agent: result.agent },
+        ...envOverrides.length === 0 ? {} : { envOverrides },
+        ...configOutcomes.length === 0 ? {} : { requests: configOutcomes },
+        ...result.tracker.changedDuringRun ? { changedDuringRun: true } : {}
+      };
       return {
         text: chunks.join("").trim(),
         stopReason: result.response.stopReason,
         sessionId: result.sessionId,
-        warnings: []
+        ...agentConfig === void 0 ? {} : { agentConfig },
+        warnings: configWarnings
       };
     } catch (error40) {
       if (controller.signal.aborted) {
@@ -32031,6 +32362,7 @@ var KimiAcpClient = class {
           }
         );
       }
+      if (error40 instanceof RelayError) throw error40;
       const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
       throw new RelayError(
         `Kimi ACP failed: ${toErrorMessage(error40)}${diagnostic ? `
@@ -32687,7 +33019,9 @@ var TaskRunner = class {
             kind: record2.kind,
             prompt: buildPrompt(record2.kind, record2.prompt, prepared.diffIsEmpty),
             workspaceDir: prepared.path,
-            timeoutMs: record2.timeoutMs
+            timeoutMs: record2.timeoutMs,
+            ...record2.model === void 0 ? {} : { model: record2.model },
+            ...record2.thinkingEffort === void 0 ? {} : { thinkingEffort: record2.thinkingEffort }
           },
           async (message) => {
             progressCount += 1;
@@ -32720,6 +33054,7 @@ var TaskRunner = class {
             sessionId: agentResult.sessionId,
             ...patchPath === void 0 ? {} : { patchPath },
             ...record2.keepWorkspace ? { workspacePath: prepared.path } : {},
+            ...agentResult.agentConfig === void 0 ? {} : { agentConfig: agentResult.agentConfig },
             warnings: [...prepared.warnings, ...agentResult.warnings]
           },
           events: capEvents([
@@ -32730,8 +33065,8 @@ var TaskRunner = class {
       });
       return completed;
     } catch (error40) {
-      const errorCode = error40 instanceof RelayError ? error40.code : "UNKNOWN";
-      const status = errorCode === "CANCELLED" ? "cancelled" : errorCode === "TIMEOUT" ? "timed_out" : "failed";
+      const errorCode2 = error40 instanceof RelayError ? error40.code : "UNKNOWN";
+      const status = errorCode2 === "CANCELLED" ? "cancelled" : errorCode2 === "TIMEOUT" ? "timed_out" : "failed";
       const failedAt = now();
       const failed = await this.store.update(
         id,
@@ -32768,6 +33103,14 @@ function isProcessAlive(pid) {
 function now2() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
+function validateConfigValue(value, field) {
+  const trimmed = value?.trim();
+  if (trimmed === void 0 || trimmed === "") return void 0;
+  if (trimmed.length > 200 || /[\0\r\n]/u.test(trimmed)) {
+    throw new RelayError(`${field} is not a valid configuration value.`, "INVALID_AGENT_CONFIG");
+  }
+  return trimmed;
+}
 function validateRequest(request, config3) {
   const prompt = request.prompt.trim();
   if (prompt.length < 3) throw new RelayError("Task prompt is too short.", "INVALID_PROMPT");
@@ -32784,6 +33127,8 @@ function validateRequest(request, config3) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1e4 || timeoutMs > 24 * 60 * 60 * 1e3) {
     throw new RelayError("timeoutMs must be between 10 seconds and 24 hours.", "INVALID_TIMEOUT");
   }
+  const model = validateConfigValue(request.model, "model");
+  const thinkingEffort = validateConfigValue(request.thinkingEffort, "thinkingEffort");
   return {
     kind: request.kind,
     prompt,
@@ -32791,7 +33136,9 @@ function validateRequest(request, config3) {
     background: request.background ?? false,
     baseRef,
     timeoutMs,
-    keepWorkspace: request.keepWorkspace ?? false
+    keepWorkspace: request.keepWorkspace ?? false,
+    ...model === void 0 ? {} : { model },
+    ...thinkingEffort === void 0 ? {} : { thinkingEffort }
   };
 }
 var TaskService = class {
@@ -32819,6 +33166,8 @@ var TaskService = class {
       background: input.background,
       keepWorkspace: input.keepWorkspace,
       timeoutMs: input.timeoutMs,
+      ...input.model === void 0 ? {} : { model: input.model },
+      ...input.thinkingEffort === void 0 ? {} : { thinkingEffort: input.thinkingEffort },
       createdAt: at,
       updatedAt: at,
       status: "queued",
@@ -32982,7 +33331,13 @@ server.registerTool(
         "Git revision used as the comparison baseline for review and challenge tasks. Omit to auto-select the merge-base with the branch's upstream."
       ),
       timeoutMs: external_exports.number().int().min(1e4).max(864e5).optional().describe("Task timeout in milliseconds (10 seconds to 24 hours)."),
-      keepWorkspace: external_exports.boolean().default(false).describe("Keep the isolated workspace after completion for manual inspection.")
+      keepWorkspace: external_exports.boolean().default(false).describe("Keep the isolated workspace after completion for manual inspection."),
+      model: external_exports.string().max(200).optional().describe(
+        "Optional model to request from the agent, matched against the models it advertises for the session. Pass this only when the user named a model; do not guess one. Ignored with a warning if the agent does not offer it, and the result always reports what actually ran."
+      ),
+      thinkingEffort: external_exports.string().max(200).optional().describe(
+        "Optional reasoning effort to request (for example low, high, or max), matched against the levels the agent advertises. Pass this only when the user asked for one. Ignored with a warning if the agent does not offer it."
+      )
     })
   },
   async (input) => text(
@@ -32994,7 +33349,9 @@ server.registerTool(
         background: input.background,
         ...input.baseRef === void 0 ? {} : { baseRef: input.baseRef },
         ...input.timeoutMs === void 0 ? {} : { timeoutMs: input.timeoutMs },
-        keepWorkspace: input.keepWorkspace
+        keepWorkspace: input.keepWorkspace,
+        ...input.model === void 0 ? {} : { model: input.model },
+        ...input.thinkingEffort === void 0 ? {} : { thinkingEffort: input.thinkingEffort }
       })
     )
   )
