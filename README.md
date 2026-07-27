@@ -49,7 +49,7 @@ Beyond that:
 
 - Review and challenge tasks refuse write permissions outright.
 - File reads and writes over ACP resolve to canonical paths and get rejected if they leave the workspace, follow a symlink out of it, exceed the size limit, or point at something that looks like a credential.
-- Publishing, pushing, committing, installing dependencies, network tools, `sudo`, and the usual credential paths are denied by default.
+- Publishing, pushing, committing, installing dependencies, network tools, `sudo`, and the usual credential paths are denied by default — for every tool call Kimi asks about. Whether it asks is Kimi's decision: its `auto` and `yolo` session modes stop asking altogether, and that mode can be preset in your own `~/.kimi-code/config.toml`. The relay cannot override that, so instead it counts the tool calls Kimi announced against the approvals it requested, and says so on the result when the policy never ran.
 - Kimi inherits an allowlist of environment variables rather than your entire environment. The allowlist matches by prefix and deliberately passes Kimi's own `KIMI_*` and `MOONSHOT_*` variables through, since that is how you point Kimi at your own provider — which also means those variables decide which model, reasoning level, endpoint, and credential Kimi uses. See [Pointing Kimi at a different model](#pointing-kimi-at-a-different-model).
 - Task files are written atomically behind a cross-process lock, and results, command output, copied files, and workspace size are all bounded.
 

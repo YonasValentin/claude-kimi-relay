@@ -333,7 +333,10 @@ void test("a run that fails after the session started still reports what it was 
   const error = await runFailure("silent", dir, { timeoutMs: 400, reports, thinkingEffort: "max" });
 
   assert.equal(error.code, "TIMEOUT");
-  assert.equal(reports.length, 1, "the report must arrive before the prompt, not with the result");
+  // The first report is the one that matters: it must arrive before the prompt,
+  // not with the result. A second follows from the failure path carrying the
+  // final warnings.
+  assert.ok(reports.length >= 1, "no report arrived before the run failed");
   assert.deepEqual(reports[0]?.agentConfig, {
     summary: "Model=fake/large, Thinking=max",
     options: [
@@ -352,4 +355,37 @@ void test("a configuration warning survives a run that then fails", async (t) =>
   await runFailure("silent", dir, { timeoutMs: 400, reports, thinkingEffort: "nonsense" });
 
   assert.match(reports[0]?.warnings[0] ?? "", /does not offer thinking effort "nonsense"/u);
+});
+
+void test("tool calls the relay was never asked to approve are reported as ungated", async (t) => {
+  // Kimi's auto and yolo session modes stop sending session/request_permission
+  // entirely -- its own documentation calls that those modes' explicit contract
+  // -- and the mode can be preset in the user's kimi config. The relay cannot
+  // prevent that, so it has to notice and say so, or a review silently runs
+  // with the deny-first command policy never consulted.
+  const dir = await workspace(t);
+
+  const result = await run("ungated-tools", dir);
+
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0] ?? "", /ran 2 tool calls without asking this relay/u);
+  assert.match(result.warnings[0] ?? "", /session mode as "yolo"/u);
+});
+
+void test("a run whose tool call went through the policy raises no ungated warning", async (t) => {
+  // The tool call is announced before its permission request, so a check made
+  // at the first tool call would fire on every correctly gated run.
+  const dir = await workspace(t);
+
+  const result = await run("permission", dir);
+
+  assert.deepEqual(result.warnings, []);
+});
+
+void test("a run with no tool calls at all raises no ungated warning", async (t) => {
+  const dir = await workspace(t);
+
+  const result = await run("ok", dir);
+
+  assert.deepEqual(result.warnings, []);
 });

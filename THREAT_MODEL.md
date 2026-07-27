@@ -15,7 +15,7 @@
 - The relay launches `kimi acp` as the current operating-system user.
 - Kimi works in a fresh isolated two-commit repository or filtered snapshot, never the original project directory or original Git history.
 - ACP filesystem requests pass through canonical path, symlink, size, and secret-path checks.
-- Tool permission requests pass through a deny-first policy.
+- Tool permission requests pass through a deny-first policy — for the tool calls the agent chooses to ask about. Whether it asks is the agent's decision, not the relay's.
 
 ## Controls
 
@@ -26,6 +26,7 @@
 - Task JSON updates use atomic replacement and per-task cross-process locks.
 - Kimi inherits an environment allowlist, with credentials stripped from any forwarded proxy URL. The allowlist matches by prefix and deliberately includes Kimi's own `KIMI_*` and `MOONSHOT_*` families, because that is how a developer points Kimi at their own provider. Per Kimi's documentation those variables can change which model answers (`KIMI_MODEL_NAME`), which reasoning level it uses (`KIMI_MODEL_THINKING_EFFORT`, which bypasses the model's declared effort levels), which endpoint receives the request (`KIMI_MODEL_BASE_URL`), which credential is used (`KIMI_MODEL_API_KEY`), and where Kimi's config, sessions, logs, and OAuth credentials live (`KIMI_CODE_HOME`). They are read from the environment the relay itself was started in, not from anything a task can supply.
 - Copied symlinks are rewritten to workspace-relative targets, and the agent runs in its own process group so termination reaches any helper it spawned.
+- Tool calls the relay was never asked to approve are counted and reported on the result. The relay cannot force an agent to ask: Kimi's `auto` and `yolo` session modes stop sending permission requests entirely — its own documentation calls that "those modes' explicit contract" — and the mode can be preset with `default_permission_mode` in the user's `~/.kimi-code/config.toml`, which every relayed session inherits. So the control here is detection, not prevention, and it is deliberately agent-agnostic: it compares the number of announced tool calls against the number of approval requests, rather than relying on any agent's mode names.
 - A caller-requested model or reasoning level is used only as a lookup key against the options the agent advertised for that session. The relay never sends a caller-supplied string as a configuration value, never offers a general way to set arbitrary agent options, and never advertises the boolean session-configuration capability. What actually ran is reported on the result.
 
 ## Residual risks

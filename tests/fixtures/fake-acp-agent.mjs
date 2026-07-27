@@ -78,6 +78,23 @@ function configOptions() {
       currentValue: state.thinking,
       options: efforts.map((value) => ({ value, name: value })),
     },
+    // Only the ungated scenario advertises a mode, so the other tests keep
+    // asserting on a two-option summary.
+    ...(scenario === "ungated-tools"
+      ? [
+          {
+            type: "select",
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            currentValue: "yolo",
+            options: [
+              { value: "default", name: "Default" },
+              { value: "yolo", name: "YOLO" },
+            ],
+          },
+        ]
+      : []),
   ];
 }
 
@@ -126,6 +143,14 @@ async function runPrompt(id) {
       // when it falls back after a rate limit.
       state.thinking = "low";
       update({ sessionUpdate: "config_option_update", configOptions: configOptions() });
+      break;
+    case "ungated-tools":
+      // An agent in an auto-approving mode: it announces its tool calls but
+      // never asks the client to approve them, so the deny-first policy is not
+      // consulted at all. Verified against Kimi 0.29.0 in yolo mode.
+      update({ sessionUpdate: "tool_call", toolCallId: "t1", title: "Bash", kind: "execute" });
+      update({ sessionUpdate: "tool_call", toolCallId: "t2", title: "Bash", kind: "execute" });
+      textChunk("did whatever it liked");
       break;
     case "silent":
       // Never responds. The relay's own timeout has to end the run.
