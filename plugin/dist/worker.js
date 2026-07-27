@@ -15216,7 +15216,7 @@ var KimiAcpClient = class {
     const onExternalAbort = () => controller2.abort();
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     const timeout = setTimeout(() => controller2.abort(), request.timeoutMs);
-    const child = spawn2(this.config.kimiCliPath, ["acp"], {
+    const child = spawn2(this.config.kimiCliPath, [...this.config.kimiCliArgs ?? ["acp"]], {
       cwd: request.workspaceDir,
       env: sanitizedAgentEnvironment(),
       shell: false,
@@ -15254,9 +15254,11 @@ var KimiAcpClient = class {
       });
       child.once("exit", (code, signal) => {
         if (protocolFinished || controller2.signal.aborted) return;
+        const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
         reject(
           new RelayError(
-            `Kimi Code exited before ACP completed (${signal ?? `exit ${code ?? "unknown"}`}).`,
+            `Kimi Code exited before ACP completed (${signal ?? `exit ${code ?? "unknown"}`}).${diagnostic ? `
+${diagnostic}` : ""}`,
             "KIMI_EXITED"
           )
         );
@@ -15365,6 +15367,7 @@ var KimiAcpClient = class {
           }
         );
       }
+      if (error40 instanceof RelayError) throw error40;
       const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
       throw new RelayError(
         `Kimi ACP failed: ${toErrorMessage(error40)}${diagnostic ? `

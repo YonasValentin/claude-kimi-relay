@@ -69,6 +69,11 @@ export interface RelayConfig {
   readonly dataDir: string;
   readonly projectDir?: string;
   readonly kimiCliPath: string;
+  // Arguments the Kimi CLI is spawned with, defaulting to the documented ACP
+  // entry point. Set by a constructor only -- never from the environment, so no
+  // ambient variable can change how the agent is launched. It exists so the ACP
+  // client can be tested against a stand-in agent.
+  readonly kimiCliArgs?: readonly string[];
   readonly defaultTimeoutMs: number;
   readonly maxFileBytes: number;
   readonly maxWorkspaceBytes: number;

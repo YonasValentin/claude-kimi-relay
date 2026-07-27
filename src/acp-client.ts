@@ -95,7 +95,7 @@ export class KimiAcpClient {
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs);
 
-    const child = spawn(this.config.kimiCliPath, ["acp"], {
+    const child = spawn(this.config.kimiCliPath, [...(this.config.kimiCliArgs ?? ["acp"])], {
       cwd: request.workspaceDir,
       env: sanitizedAgentEnvironment(),
       shell: false,
@@ -136,9 +136,14 @@ export class KimiAcpClient {
       });
       child.once("exit", (code, signal) => {
         if (protocolFinished || controller.signal.aborted) return;
+        // An agent that dies on startup explains itself on stderr and nowhere
+        // else. Dropping that left the user with an exit code and no reason.
+        const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
         reject(
           new RelayError(
-            `Kimi Code exited before ACP completed (${signal ?? `exit ${code ?? "unknown"}`}).`,
+            `Kimi Code exited before ACP completed (${signal ?? `exit ${code ?? "unknown"}`}).${
+              diagnostic ? `\n${diagnostic}` : ""
+            }`,
             "KIMI_EXITED",
           ),
         );
@@ -259,6 +264,12 @@ export class KimiAcpClient {
           },
         );
       }
+      // A RelayError raised inside the protocol already carries a precise code
+      // and a message written for the person reading it -- KIMI_AUTH_REQUIRED
+      // tells them how to sign in, ACP_VERSION_MISMATCH which versions to align,
+      // KIMI_EXITED that the agent died. Wrapping it would replace all of that
+      // with a generic KIMI_ACP_FAILED and hide the code from the caller.
+      if (error instanceof RelayError) throw error;
       const diagnostic = Buffer.concat(stderr).toString("utf8").trim();
       throw new RelayError(
         `Kimi ACP failed: ${toErrorMessage(error)}${diagnostic ? `\n${diagnostic}` : ""}`,
