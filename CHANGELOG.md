@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-27
+
 ### Added
 
 - Every completed task now reports what produced it, under `result.agentConfig`: the agent's name and version from the ACP `initialize` response, and its session configuration options — model, reasoning level, mode — exactly as the agent reported them on `session/new`. A change the agent makes mid-run is folded in and flagged with `changedDuringRun`. There is deliberately no `model` field: the relay reports the agent's own option ids and values rather than claiming to know which one is the model, and an agent that advertises no configuration yields no options rather than a guess.
