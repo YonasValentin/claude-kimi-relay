@@ -82,7 +82,14 @@ export interface AgentConfigReport {
 }
 
 export interface TaskResult {
-  readonly summary: string;
+  /**
+   * The agent's own output. Absent when the task did not get far enough to
+   * produce one -- a failed, cancelled or timed-out run still carries the
+   * `agentConfig` and `warnings` below, because what ran and what went sideways
+   * are worth knowing precisely when there is no result. `error` on the record
+   * says why it ended.
+   */
+  readonly summary?: string;
   readonly stopReason?: string;
   readonly sessionId?: string;
   readonly patchPath?: string;

@@ -4,6 +4,11 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+### Fixed
+
+- A failed, cancelled or timed-out task now reports what produced it. The failure path wrote `error` and no result at all, so a run that died after the agent started told you neither which model produced the silence nor the workspace warnings gathered before it ever ran -- including the loud "there are no changes to review" one, which is often the actual explanation. The agent's identity is published as soon as the session is configured, before the prompt is sent, so it survives a path that reaches the caller as a thrown error.
+- `TaskResult.summary` is now optional, because a run that failed has no summary; `error` says why it ended. Readers that already treated `result` as optional are unaffected, and the CLI still falls back to `error`.
+
 ## [0.3.0] - 2026-07-27
 
 ### Added

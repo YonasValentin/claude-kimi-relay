@@ -26,11 +26,26 @@ import {
   setRequestBody,
   summarizeConfigOptions,
   toConfigSnapshot,
+  type ConfigOptionState,
   type ConfigRequest,
 } from "./session-config.js";
 import { VERSION } from "./version.js";
 
 export type AgentProgressSink = (message: string) => Promise<void> | void;
+
+/**
+ * Reports what the agent is running as, and anything already worth warning
+ * about, as soon as the session is configured -- before the prompt is sent.
+ *
+ * `run` communicates a completed run by returning, and every failure by
+ * throwing, so on the failure path nothing it learned would otherwise escape.
+ * That is the path where provenance matters most: a task that timed out or was
+ * cancelled still has an answer to "what was it running as?".
+ */
+export type AgentReportSink = (report: {
+  readonly agentConfig: AgentConfigReport;
+  readonly warnings: readonly string[];
+}) => void;
 
 function extractText(update: unknown): string | undefined {
   if (typeof update !== "object" || update === null) return undefined;
@@ -121,6 +136,7 @@ export class KimiAcpClient {
     request: AgentRunRequest,
     onProgress: AgentProgressSink = () => undefined,
     externalSignal?: AbortSignal,
+    onReport: AgentReportSink = () => undefined,
   ): Promise<AgentRunResult> {
     const controller = new AbortController();
     const onExternalAbort = (): void => controller.abort();
@@ -155,7 +171,36 @@ export class KimiAcpClient {
     const chunks: string[] = [];
     const configWarnings: string[] = [];
     const configOutcomes: AgentConfigRequestOutcome[] = [];
+    const envOverrides = environmentOverrides(agentEnv);
     let resultBytes = 0;
+
+    const buildReport = (
+      agent: { readonly name: string; readonly version: string } | undefined,
+      state: readonly ConfigOptionState[],
+      changedDuringRun: boolean,
+    ): AgentConfigReport | undefined => {
+      const options = toConfigSnapshot(state);
+      // Nothing to say: no agent identity and no advertised configuration. An
+      // empty report would be noise for Claude to interpret.
+      if (options.length === 0 && agent === undefined) return undefined;
+      return {
+        summary: summarizeConfigOptions(state),
+        options,
+        ...(agent === undefined ? {} : { agent }),
+        ...(envOverrides.length === 0 ? {} : { envOverrides }),
+        ...(configOutcomes.length === 0 ? {} : { requests: configOutcomes }),
+        ...(changedDuringRun ? { changedDuringRun: true } : {}),
+      };
+    };
+
+    const publishReport = (
+      agent: { readonly name: string; readonly version: string } | undefined,
+      state: readonly ConfigOptionState[],
+      changedDuringRun: boolean,
+    ): void => {
+      const agentConfig = buildReport(agent, state, changedDuringRun);
+      if (agentConfig !== undefined) onReport({ agentConfig, warnings: [...configWarnings] });
+    };
     const mode = request.kind === "delegate" ? "delegate" : "review";
 
     let protocolFinished = false;
@@ -299,6 +344,10 @@ export class KimiAcpClient {
               summarizeConfigOptions(tracker.state) || undefined,
             ].filter((part) => part !== undefined);
             await onProgress(`${introduction.join(" | ")}.`);
+            // Published before the prompt is sent, so a run that later times out
+            // or is cancelled -- which reaches the caller as a throw, carrying
+            // nothing -- can still say what it was running as.
+            publishReport(agent, tracker.state, false);
 
             void session.prompt(request.prompt);
             for (;;) {
@@ -328,26 +377,21 @@ export class KimiAcpClient {
               // instance when it falls back after a rate limit. Reporting the
               // session-start snapshot as if it still held would be a lie.
               const configChange = tracker.observe(message.notification.update);
-              if (configChange !== undefined) await onProgress(configChange);
+              if (configChange !== undefined) {
+                await onProgress(configChange);
+                publishReport(agent, tracker.state, tracker.changedDuringRun);
+              }
             }
           });
         });
 
       const result = await Promise.race([protocolResult, childFailure]);
       protocolFinished = true;
-      const envOverrides = environmentOverrides(agentEnv);
-      const options = toConfigSnapshot(result.tracker.state);
-      const agentConfig: AgentConfigReport | undefined =
-        options.length === 0 && result.agent === undefined
-          ? undefined
-          : {
-              summary: summarizeConfigOptions(result.tracker.state),
-              options,
-              ...(result.agent === undefined ? {} : { agent: result.agent }),
-              ...(envOverrides.length === 0 ? {} : { envOverrides }),
-              ...(configOutcomes.length === 0 ? {} : { requests: configOutcomes }),
-              ...(result.tracker.changedDuringRun ? { changedDuringRun: true } : {}),
-            };
+      const agentConfig = buildReport(
+        result.agent,
+        result.tracker.state,
+        result.tracker.changedDuringRun,
+      );
       return {
         text: chunks.join("").trim(),
         stopReason: result.response.stopReason,
