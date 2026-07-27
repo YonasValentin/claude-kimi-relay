@@ -1,4 +1,11 @@
-import type { AgentRunResult, RelayConfig, TaskEvent, TaskRecord, TaskStatus } from "./types.js";
+import type {
+  AgentConfigReport,
+  AgentRunResult,
+  RelayConfig,
+  TaskEvent,
+  TaskRecord,
+  TaskStatus,
+} from "./types.js";
 import { KimiAcpClient } from "./acp-client.js";
 import { RelayError, toErrorMessage } from "./errors.js";
 import { startHeartbeat } from "./heartbeat.js";
@@ -65,6 +72,14 @@ export class TaskRunner {
     if (record.status !== "queued") return record;
     let preparedPath: string | undefined;
     let keepWorkspace = record.keepWorkspace;
+    // Held outside the try so the failure path can still report them. The
+    // workspace warnings (an empty review diff, an excluded secret) are known
+    // before the agent starts, and the agent's identity arrives before its first
+    // token -- losing both on failure threw away the answer to "what ran, and
+    // what should I have known about it?" exactly when it is most wanted.
+    let preparedWarnings: readonly string[] = [];
+    let agentConfig: AgentConfigReport | undefined;
+    let agentWarnings: readonly string[] = [];
 
     try {
       // Record which process owns the run so a crash leaves a reconcilable trail.
@@ -87,6 +102,7 @@ export class TaskRunner {
         record.baseRef,
       );
       preparedPath = prepared.path;
+      preparedWarnings = prepared.warnings;
       keepWorkspace = record.keepWorkspace;
       record = await this.store.update(id, (current) =>
         TERMINAL.has(current.status)
@@ -147,6 +163,10 @@ export class TaskRunner {
             await this.transition(id, "running", message);
           },
           signal,
+          (report) => {
+            agentConfig = report.agentConfig;
+            agentWarnings = report.warnings;
+          },
         );
       } finally {
         heartbeat.stop();
@@ -179,7 +199,7 @@ export class TaskRunner {
             ...(agentResult.agentConfig === undefined
               ? {}
               : { agentConfig: agentResult.agentConfig }),
-            warnings: [...prepared.warnings, ...agentResult.warnings],
+            warnings: [...preparedWarnings, ...agentResult.warnings],
           },
           events: capEvents([
             ...current.events,
@@ -193,6 +213,14 @@ export class TaskRunner {
       const status: TaskStatus =
         errorCode === "CANCELLED" ? "cancelled" : errorCode === "TIMEOUT" ? "timed_out" : "failed";
       const failedAt = now();
+      // A failed run has no summary -- `error` says why it ended -- but it does
+      // have provenance and warnings, and those are worth more here than on a
+      // run that worked.
+      const warnings = [...preparedWarnings, ...agentWarnings];
+      const failedResult =
+        agentConfig === undefined && warnings.length === 0
+          ? undefined
+          : { ...(agentConfig === undefined ? {} : { agentConfig }), warnings };
       const failed = await this.store.update(id, (current) =>
         TERMINAL.has(current.status)
           ? current
@@ -201,6 +229,7 @@ export class TaskRunner {
               status,
               updatedAt: failedAt,
               error: toErrorMessage(error),
+              ...(failedResult === undefined ? {} : { result: failedResult }),
               events: capEvents([
                 ...current.events,
                 { at: failedAt, status, message: toErrorMessage(error) },

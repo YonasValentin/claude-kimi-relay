@@ -15582,7 +15582,7 @@ var KimiAcpClient = class {
     this.config = config2;
   }
   policy = new PermissionPolicy();
-  async run(request, onProgress = () => void 0, externalSignal) {
+  async run(request, onProgress = () => void 0, externalSignal, onReport = () => void 0) {
     const controller = new AbortController();
     const onExternalAbort = () => controller.abort();
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
@@ -15613,7 +15613,24 @@ var KimiAcpClient = class {
     const chunks = [];
     const configWarnings = [];
     const configOutcomes = [];
+    const envOverrides = environmentOverrides(agentEnv);
     let resultBytes = 0;
+    const buildReport = (agent, state, changedDuringRun) => {
+      const options = toConfigSnapshot(state);
+      if (options.length === 0 && agent === void 0) return void 0;
+      return {
+        summary: summarizeConfigOptions(state),
+        options,
+        ...agent === void 0 ? {} : { agent },
+        ...envOverrides.length === 0 ? {} : { envOverrides },
+        ...configOutcomes.length === 0 ? {} : { requests: configOutcomes },
+        ...changedDuringRun ? { changedDuringRun: true } : {}
+      };
+    };
+    const publishReport = (agent, state, changedDuringRun) => {
+      const agentConfig = buildReport(agent, state, changedDuringRun);
+      if (agentConfig !== void 0) onReport({ agentConfig, warnings: [...configWarnings] });
+    };
     const mode = request.kind === "delegate" ? "delegate" : "review";
     let protocolFinished = false;
     const childFailure = new Promise((_resolve, reject) => {
@@ -15730,6 +15747,7 @@ ${diagnostic}` : ""}`,
             summarizeConfigOptions(tracker.state) || void 0
           ].filter((part) => part !== void 0);
           await onProgress(`${introduction.join(" | ")}.`);
+          publishReport(agent, tracker.state, false);
           void session.prompt(request.prompt);
           for (; ; ) {
             const message = await session.nextUpdate();
@@ -15755,22 +15773,20 @@ ${diagnostic}` : ""}`,
             const progress = extractProgress(message.notification.update);
             if (progress !== void 0) await onProgress(progress);
             const configChange = tracker.observe(message.notification.update);
-            if (configChange !== void 0) await onProgress(configChange);
+            if (configChange !== void 0) {
+              await onProgress(configChange);
+              publishReport(agent, tracker.state, tracker.changedDuringRun);
+            }
           }
         });
       });
       const result = await Promise.race([protocolResult, childFailure]);
       protocolFinished = true;
-      const envOverrides = environmentOverrides(agentEnv);
-      const options = toConfigSnapshot(result.tracker.state);
-      const agentConfig = options.length === 0 && result.agent === void 0 ? void 0 : {
-        summary: summarizeConfigOptions(result.tracker.state),
-        options,
-        ...result.agent === void 0 ? {} : { agent: result.agent },
-        ...envOverrides.length === 0 ? {} : { envOverrides },
-        ...configOutcomes.length === 0 ? {} : { requests: configOutcomes },
-        ...result.tracker.changedDuringRun ? { changedDuringRun: true } : {}
-      };
+      const agentConfig = buildReport(
+        result.agent,
+        result.tracker.state,
+        result.tracker.changedDuringRun
+      );
       return {
         text: chunks.join("").trim(),
         stopReason: result.response.stopReason,
@@ -16397,6 +16413,9 @@ var TaskRunner = class {
     if (record2.status !== "queued") return record2;
     let preparedPath;
     let keepWorkspace = record2.keepWorkspace;
+    let preparedWarnings = [];
+    let agentConfig;
+    let agentWarnings = [];
     try {
       record2 = await this.store.update(
         id,
@@ -16416,6 +16435,7 @@ var TaskRunner = class {
         record2.baseRef
       );
       preparedPath = prepared.path;
+      preparedWarnings = prepared.warnings;
       keepWorkspace = record2.keepWorkspace;
       record2 = await this.store.update(
         id,
@@ -16465,7 +16485,11 @@ var TaskRunner = class {
             heartbeat.recordActivity();
             await this.transition(id, "running", message);
           },
-          signal
+          signal,
+          (report) => {
+            agentConfig = report.agentConfig;
+            agentWarnings = report.warnings;
+          }
         );
       } finally {
         heartbeat.stop();
@@ -16492,7 +16516,7 @@ var TaskRunner = class {
             ...patchPath === void 0 ? {} : { patchPath },
             ...record2.keepWorkspace ? { workspacePath: prepared.path } : {},
             ...agentResult.agentConfig === void 0 ? {} : { agentConfig: agentResult.agentConfig },
-            warnings: [...prepared.warnings, ...agentResult.warnings]
+            warnings: [...preparedWarnings, ...agentResult.warnings]
           },
           events: capEvents([
             ...current.events,
@@ -16505,6 +16529,8 @@ var TaskRunner = class {
       const errorCode2 = error40 instanceof RelayError ? error40.code : "UNKNOWN";
       const status = errorCode2 === "CANCELLED" ? "cancelled" : errorCode2 === "TIMEOUT" ? "timed_out" : "failed";
       const failedAt = now();
+      const warnings = [...preparedWarnings, ...agentWarnings];
+      const failedResult = agentConfig === void 0 && warnings.length === 0 ? void 0 : { ...agentConfig === void 0 ? {} : { agentConfig }, warnings };
       const failed = await this.store.update(
         id,
         (current) => TERMINAL.has(current.status) ? current : {
@@ -16512,6 +16538,7 @@ var TaskRunner = class {
           status,
           updatedAt: failedAt,
           error: toErrorMessage(error40),
+          ...failedResult === void 0 ? {} : { result: failedResult },
           events: capEvents([
             ...current.events,
             { at: failedAt, status, message: toErrorMessage(error40) }

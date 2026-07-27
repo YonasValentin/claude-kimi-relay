@@ -42,6 +42,7 @@ async function run(
     readonly progress?: string[];
     readonly model?: string;
     readonly thinkingEffort?: string;
+    readonly reports?: { agentConfig: unknown; warnings: readonly string[] }[];
   } = {},
 ): Promise<AgentRunResult> {
   // KIMI_TEST_SCENARIO must keep its prefix: the relay filters the agent's
@@ -63,6 +64,10 @@ async function run(
       (message) => {
         options.progress?.push(message);
       },
+      undefined,
+      (report) => {
+        options.reports?.push(report);
+      },
     );
   } finally {
     delete process.env.KIMI_TEST_SCENARIO;
@@ -72,7 +77,7 @@ async function run(
 async function runFailure(
   scenario: string,
   workspaceDir: string,
-  options = {},
+  options: Parameters<typeof run>[2] = {},
 ): Promise<RelayError> {
   try {
     await run(scenario, workspaceDir, options);
@@ -316,4 +321,35 @@ void test("a file read inside the workspace is served to the agent", async (t) =
   const result = await run("fs-read", dir);
 
   assert.equal(result.text, "read:hello from the workspace");
+});
+
+void test("a run that fails after the session started still reports what it was running as", async (t) => {
+  // `run` returns on success and throws on every failure, so without this sink
+  // a timed-out or cancelled task tells you nothing about which model produced
+  // the silence -- which is exactly when you want to know.
+  const dir = await workspace(t);
+  const reports: { agentConfig: unknown; warnings: readonly string[] }[] = [];
+
+  const error = await runFailure("silent", dir, { timeoutMs: 400, reports, thinkingEffort: "max" });
+
+  assert.equal(error.code, "TIMEOUT");
+  assert.equal(reports.length, 1, "the report must arrive before the prompt, not with the result");
+  assert.deepEqual(reports[0]?.agentConfig, {
+    summary: "Model=fake/large, Thinking=max",
+    options: [
+      { id: "model", name: "Model", currentValue: "fake/large", category: "model" },
+      { id: "thinking", name: "Thinking", currentValue: "max", category: "thought_level" },
+    ],
+    agent: { name: "Fake ACP Agent", version: "1.2.3" },
+    requests: [{ configId: "thinking", requested: "max", applied: true, effectiveValue: "max" }],
+  });
+});
+
+void test("a configuration warning survives a run that then fails", async (t) => {
+  const dir = await workspace(t);
+  const reports: { agentConfig: unknown; warnings: readonly string[] }[] = [];
+
+  await runFailure("silent", dir, { timeoutMs: 400, reports, thinkingEffort: "nonsense" });
+
+  assert.match(reports[0]?.warnings[0] ?? "", /does not offer thinking effort "nonsense"/u);
 });
