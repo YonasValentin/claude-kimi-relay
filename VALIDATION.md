@@ -17,6 +17,10 @@ A security and correctness audit was applied on 2026-07-23 (see the CHANGELOG ha
 - GitHub Actions CI — the full `npm run verify` pipeline plus `npm pack --dry-run` and the plugin-bundle check passed on Ubuntu, macOS, and Windows against Node.js 22 and 24. Windows required a `.gitattributes` `eol=lf` rule, because runners check out with `core.autocrlf=true` and Prettier's default `endOfLine: "lf"` then rejects every file.
 - Live MCP smoke test over stdio: `tools/list`, schema shape checks, `doctor`, `start_task`, `get_task`, `list_tasks`, `cancel_task`.
 - Live end-to-end ACP smoke test against an authenticated `kimi acp`: a background `review` task transitioned `queued → preparing_workspace → starting_agent → running → validating → completed` and returned a correct textual result; review mode modified no files.
+- Live agent-configuration round-trip against `kimi acp`, last observed on 2026-07-27 with Kimi Code CLI 0.29.0. These are capability-conditional observations, not guarantees: an agent that advertises no session configuration options reports none, and the values below are what this Kimi build offered on that date. Three runs, all completed:
+  - `--thinking-effort max` was applied and the result reported `Model=kimi-code/k3, Thinking=max, Mode=default` together with `agent: Kimi Code CLI 0.29.0`. The agent's own echo of that change produced no spurious "changed its session config" event.
+  - `--model kimi-code/kimi-for-coding --thinking-effort max` applied the model, after which the agent offered only `on` for thinking. The effort was refused client-side with the offered list named, the task still completed, and the result reported `Thinking=on` rather than the requested `max` — the dependent-option rewrite that makes model-before-effort ordering necessary.
+  - `--model no-such-model` sent nothing over the wire, warned with the three models the agent actually advertised, and the task completed at the agent's default.
 
 ## Still required before public release
 
