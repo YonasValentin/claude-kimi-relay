@@ -172,6 +172,67 @@ void test("a delegate write that climbs out of the workspace is refused", async 
   await assert.rejects(readFile(join(dir, "..", "escaped.txt"), "utf8"));
 });
 
+void test("a result says which agent, model and reasoning level produced it", async (t) => {
+  const dir = await workspace(t);
+  const progress: string[] = [];
+
+  const { agentConfig } = await run("ok", dir, { progress });
+
+  assert.ok(agentConfig);
+  assert.deepEqual(agentConfig.agent, { name: "Fake ACP Agent", version: "1.2.3" });
+  assert.equal(agentConfig.summary, "Model=fake/large, Thinking=high");
+  assert.deepEqual(
+    agentConfig.options.map((option) => [option.id, option.currentValue, option.category]),
+    [
+      ["model", "fake/large", "model"],
+      ["thinking", "high", "thought_level"],
+    ],
+  );
+  // Reported before the prompt is sent, so a task that later hangs still says
+  // what it was running as.
+  assert.match(progress[0] ?? "", /Fake ACP Agent 1\.2\.3 \| Model=fake\/large/u);
+  assert.equal(agentConfig.changedDuringRun, undefined);
+});
+
+void test("an agent that advertises no configuration is still identified, with no invented options", async (t) => {
+  const dir = await workspace(t);
+
+  const { agentConfig } = await run("no-config", dir);
+
+  assert.ok(agentConfig);
+  assert.deepEqual(agentConfig.options, []);
+  assert.equal(agentConfig.summary, "");
+  assert.deepEqual(agentConfig.agent, { name: "Fake ACP Agent", version: "1.2.3" });
+});
+
+void test("a model or effort change during the run is reported, not overwritten by the start state", async (t) => {
+  const dir = await workspace(t);
+  const progress: string[] = [];
+
+  const { agentConfig } = await run("config-change", dir, { progress });
+
+  assert.ok(agentConfig);
+  assert.equal(agentConfig.summary, "Model=fake/large, Thinking=low");
+  assert.equal(agentConfig.changedDuringRun, true);
+  assert.match(progress.join("\n"), /Thinking high -> low/u);
+});
+
+void test("an environment override is reported by name, never by value", async (t) => {
+  const dir = await workspace(t);
+  process.env.KIMI_MODEL_NAME = "some-private-model";
+  process.env.KIMI_MODEL_API_KEY = "super-secret";
+  t.after(() => {
+    delete process.env.KIMI_MODEL_NAME;
+    delete process.env.KIMI_MODEL_API_KEY;
+  });
+
+  const result = await run("ok", dir);
+
+  assert.deepEqual(result.agentConfig?.envOverrides, ["KIMI_MODEL_API_KEY", "KIMI_MODEL_NAME"]);
+  // The value of KIMI_MODEL_API_KEY is a credential; the name alone is not.
+  assert.doesNotMatch(JSON.stringify(result), /super-secret|some-private-model/u);
+});
+
 void test("a file read inside the workspace is served to the agent", async (t) => {
   const dir = await workspace(t);
   await writeFile(join(dir, "readable.txt"), "hello from the workspace\n", "utf8");

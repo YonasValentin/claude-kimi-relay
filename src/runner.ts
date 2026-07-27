@@ -172,6 +172,9 @@ export class TaskRunner {
             sessionId: agentResult.sessionId,
             ...(patchPath === undefined ? {} : { patchPath }),
             ...(record.keepWorkspace ? { workspacePath: prepared.path } : {}),
+            ...(agentResult.agentConfig === undefined
+              ? {}
+              : { agentConfig: agentResult.agentConfig }),
             warnings: [...prepared.warnings, ...agentResult.warnings],
           },
           events: capEvents([

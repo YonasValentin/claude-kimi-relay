@@ -32,12 +32,56 @@ export interface TaskEvent {
   readonly message: string;
 }
 
+/** One session configuration option, exactly as the agent reported it. */
+export interface AgentConfigOptionSnapshot {
+  readonly id: string;
+  readonly name: string;
+  readonly currentValue: string;
+  readonly category?: string;
+}
+
+/** What became of one requested configuration value. */
+export interface AgentConfigRequestOutcome {
+  readonly configId: string;
+  readonly requested: string;
+  readonly applied: boolean;
+  readonly effectiveValue?: string;
+  readonly detail?: string;
+}
+
+/**
+ * What produced a result, as the agent itself reported it.
+ *
+ * There is deliberately no `model` field here. The relay does not know which of
+ * an agent's options is "the model"; it reports the agent's own option ids,
+ * names and current values, and lets the reader draw that conclusion. An agent
+ * that advertises no configuration at all yields no options rather than a
+ * guessed or "unknown" one.
+ */
+export interface AgentConfigReport {
+  /** One line, built only from the agent's own option labels and values. */
+  readonly summary: string;
+  readonly options: readonly AgentConfigOptionSnapshot[];
+  /** Name and version from the agent's `initialize` response, when it sent them. */
+  readonly agent?: { readonly name: string; readonly version: string };
+  /**
+   * Names -- never values -- of the environment variables that were forwarded to
+   * the agent and that its documentation says override the model, reasoning
+   * level, endpoint, or data root. Their presence explains a session that
+   * ignored what was asked of it.
+   */
+  readonly envOverrides?: readonly string[];
+  readonly requests?: readonly AgentConfigRequestOutcome[];
+  readonly changedDuringRun?: boolean;
+}
+
 export interface TaskResult {
   readonly summary: string;
   readonly stopReason?: string;
   readonly sessionId?: string;
   readonly patchPath?: string;
   readonly workspacePath?: string;
+  readonly agentConfig?: AgentConfigReport;
   readonly warnings: readonly string[];
 }
 
@@ -92,6 +136,7 @@ export interface AgentRunResult {
   readonly text: string;
   readonly stopReason: string;
   readonly sessionId: string;
+  readonly agentConfig?: AgentConfigReport;
   readonly warnings: readonly string[];
 }
 

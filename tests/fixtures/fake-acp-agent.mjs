@@ -117,6 +117,15 @@ async function runPrompt(id) {
         (error) => textChunk(`read:denied:${error.message}`),
       );
       break;
+    case "config-change":
+      textChunk("switching gears");
+      // An agent may change model or reasoning level mid-turn, for instance
+      // when it falls back after a rate limit.
+      update({
+        sessionUpdate: "config_option_update",
+        configOptions: [CONFIG_OPTIONS[0], { ...CONFIG_OPTIONS[1], currentValue: "low" }],
+      });
+      break;
     case "silent":
       // Never responds. The relay's own timeout has to end the run.
       return;

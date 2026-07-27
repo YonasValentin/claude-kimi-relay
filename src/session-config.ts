@@ -13,6 +13,8 @@
 // notifications are validated by a decoder that silently drops items it cannot
 // parse -- so every field is treated as unknown and checked here.
 
+import type { AgentConfigOptionSnapshot, AgentConfigRequestOutcome } from "./types.js";
+
 // Bounds in the same spirit as MAX_EVENTS and maxResultBytes: the agent controls
 // this data, and it is copied into a task record that Claude reads back.
 const MAX_OPTIONS = 32;
@@ -164,6 +166,22 @@ export function summarizeConfigOptions(options: readonly ConfigOptionState[]): s
   return options.map((option) => `${option.label}=${option.currentValue}`).join(", ");
 }
 
+/**
+ * The reported projection of the option state: what the agent said, without the
+ * lists of values it offered. Those can run to dozens of entries per option and
+ * would be copied into every poll of every task.
+ */
+export function toConfigSnapshot(
+  options: readonly ConfigOptionState[],
+): readonly AgentConfigOptionSnapshot[] {
+  return options.map(({ id, label, currentValue, category }) => ({
+    id,
+    name: label,
+    currentValue,
+    ...(category === undefined ? {} : { category }),
+  }));
+}
+
 export function describeConfigChange(
   before: readonly ConfigOptionState[],
   after: readonly ConfigOptionState[],
@@ -256,18 +274,9 @@ export interface ConfigRequest {
   readonly requested: string;
 }
 
-/** What became of one request, structured so a caller need not read prose. */
-export interface ConfigRequestOutcome {
-  readonly configId: string;
-  readonly requested: string;
-  readonly applied: boolean;
-  readonly effectiveValue?: string;
-  readonly detail?: string;
-}
-
 export interface AppliedConfig {
   readonly state: readonly ConfigOptionState[];
-  readonly outcomes: readonly ConfigRequestOutcome[];
+  readonly outcomes: readonly AgentConfigRequestOutcome[];
   readonly warnings: readonly string[];
 }
 
@@ -308,7 +317,7 @@ export async function applyConfigRequests(
   setOption: SetConfigOption,
 ): Promise<AppliedConfig> {
   let state = parseConfigOptions(initial);
-  const outcomes: ConfigRequestOutcome[] = [];
+  const outcomes: AgentConfigRequestOutcome[] = [];
   const warnings: string[] = [];
   const sent = new Map<string, string>();
   let unsupported = false;

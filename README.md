@@ -162,6 +162,26 @@ Terminal alternatives: failed, cancelled, timed_out
 | `CLAUDE_KIMI_RELAY_MAX_WORKSPACE_BYTES` |                         `2147483648` | Maximum snapshot size                 |
 | `CLAUDE_KIMI_RELAY_MAX_RESULT_BYTES`    |                           `10485760` | Maximum streamed textual result       |
 
+## Which model answered
+
+A completed task reports what produced it, under `result.agentConfig`:
+
+```json
+{
+  "summary": "Model=kimi-code/k3, Thinking=high, Mode=default",
+  "agent": { "name": "Kimi Code CLI", "version": "0.29.0" },
+  "options": [
+    { "id": "model", "name": "Model", "currentValue": "kimi-code/k3", "category": "model" }
+  ]
+}
+```
+
+This matters when you are using Kimi as a second opinion. A review from a large model reasoning hard and one from a small model with thinking off are not interchangeable evidence, and until now the two were indistinguishable.
+
+Note what is not there: a `model` field. The relay does not know which of an agent's options is "the model" — it reports the agent's own option ids, names, and current values, and lets you draw that conclusion. An agent that advertises no configuration reports no options rather than a guessed one. If the agent changes model or reasoning level mid-run, `changedDuringRun` is set and the final values are the ones reported.
+
+`envOverrides` lists the names — never the values — of the environment variables described below that were in effect. If a task ignored what you asked for, that list is the first place to look.
+
 ## Pointing Kimi at a different model
 
 The relay does not own the model choice, and it deliberately adds no variable of its own for it. Kimi already has a documented channel, and the relay forwards it: the environment allowlist passes every `KIMI_*` and `MOONSHOT_*` variable through to `kimi acp` untouched.

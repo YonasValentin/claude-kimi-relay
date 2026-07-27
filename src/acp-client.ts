@@ -7,6 +7,7 @@ import { Readable, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 
 import type {
+  AgentConfigReport,
   AgentRunRequest,
   AgentRunResult,
   PermissionRequestLike,
@@ -16,6 +17,12 @@ import { RelayError, toErrorMessage } from "./errors.js";
 import { assertRegularFile, resolveInsideRoot } from "./fs-security.js";
 import { PermissionPolicy } from "./policy.js";
 import { sanitizedAgentEnvironment } from "./process.js";
+import {
+  ConfigTracker,
+  parseConfigOptions,
+  summarizeConfigOptions,
+  toConfigSnapshot,
+} from "./session-config.js";
 import { VERSION } from "./version.js";
 
 export type AgentProgressSink = (message: string) => Promise<void> | void;
@@ -40,6 +47,26 @@ function extractProgress(update: unknown): string | undefined {
   }
   if (record.sessionUpdate === "plan") return "Kimi updated its plan.";
   return undefined;
+}
+
+// Variables the agent's own documentation says override which model answers,
+// how hard it reasons, which endpoint receives the request, or where its
+// configuration and credentials live. Only their names are ever reported --
+// their presence explains a session that ignored what was asked of it, while
+// their values include credentials.
+function environmentOverrides(env: NodeJS.ProcessEnv): readonly string[] {
+  return Object.keys(env)
+    .filter((key) => key.startsWith("KIMI_MODEL_") || key === "KIMI_CODE_HOME")
+    .sort();
+}
+
+function readAgentInfo(
+  info: unknown,
+): { readonly name: string; readonly version: string } | undefined {
+  if (typeof info !== "object" || info === null) return undefined;
+  const record = info as Record<string, unknown>;
+  if (typeof record.name !== "string") return undefined;
+  return { name: record.name, version: typeof record.version === "string" ? record.version : "" };
 }
 
 const TERMINATE_GRACE_MS = 2000;
@@ -95,9 +122,10 @@ export class KimiAcpClient {
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs);
 
+    const agentEnv = sanitizedAgentEnvironment();
     const child = spawn(this.config.kimiCliPath, [...(this.config.kimiCliArgs ?? ["acp"])], {
       cwd: request.workspaceDir,
-      env: sanitizedAgentEnvironment(),
+      env: agentEnv,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       signal: controller.signal,
@@ -217,8 +245,22 @@ export class KimiAcpClient {
             );
           }
 
+          const agent = readAgentInfo(initializeResponse.agentInfo);
+
           return ctx.buildSession(request.workspaceDir).withSession(async (session) => {
-            await onProgress(`Kimi ACP session ${session.sessionId} started.`);
+            // The agent reports its model, reasoning level and mode here, before
+            // the prompt is even sent. Reading it is the whole reason a result
+            // can say what produced it.
+            const tracker = new ConfigTracker(
+              parseConfigOptions(session.newSessionResponse.configOptions),
+            );
+            const introduction = [
+              `Kimi ACP session ${session.sessionId} started`,
+              agent === undefined ? undefined : `${agent.name} ${agent.version}`.trim(),
+              summarizeConfigOptions(tracker.state) || undefined,
+            ].filter((part) => part !== undefined);
+            await onProgress(`${introduction.join(" | ")}.`);
+
             void session.prompt(request.prompt);
             for (;;) {
               const message = await session.nextUpdate();
@@ -226,6 +268,8 @@ export class KimiAcpClient {
                 return {
                   response: message.response,
                   sessionId: session.sessionId,
+                  agent,
+                  tracker,
                 };
               }
               const text = extractText(message.notification.update);
@@ -241,16 +285,34 @@ export class KimiAcpClient {
               }
               const progress = extractProgress(message.notification.update);
               if (progress !== undefined) await onProgress(progress);
+              // An agent may switch model or reasoning level mid-turn, for
+              // instance when it falls back after a rate limit. Reporting the
+              // session-start snapshot as if it still held would be a lie.
+              const configChange = tracker.observe(message.notification.update);
+              if (configChange !== undefined) await onProgress(configChange);
             }
           });
         });
 
       const result = await Promise.race([protocolResult, childFailure]);
       protocolFinished = true;
+      const envOverrides = environmentOverrides(agentEnv);
+      const options = toConfigSnapshot(result.tracker.state);
+      const agentConfig: AgentConfigReport | undefined =
+        options.length === 0 && result.agent === undefined
+          ? undefined
+          : {
+              summary: summarizeConfigOptions(result.tracker.state),
+              options,
+              ...(result.agent === undefined ? {} : { agent: result.agent }),
+              ...(envOverrides.length === 0 ? {} : { envOverrides }),
+              ...(result.tracker.changedDuringRun ? { changedDuringRun: true } : {}),
+            };
       return {
         text: chunks.join("").trim(),
         stopReason: result.response.stopReason,
         sessionId: result.sessionId,
+        ...(agentConfig === undefined ? {} : { agentConfig }),
         warnings: [],
       };
     } catch (error) {

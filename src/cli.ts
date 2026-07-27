@@ -76,6 +76,22 @@ async function main(): Promise<void> {
       const record = await service.get(id);
       console.log(record.result?.summary ?? record.error ?? `Task status: ${record.status}`);
       if (record.result?.patchPath) console.log(`\nPatch: ${record.result.patchPath}`);
+      const agentConfig = record.result?.agentConfig;
+      if (agentConfig) {
+        // Which model and reasoning level answered is part of how much weight
+        // the answer deserves, so it prints with the result rather than hiding
+        // in the JSON of `status`.
+        const agent = agentConfig.agent;
+        const parts = [
+          agent === undefined ? undefined : `${agent.name} ${agent.version}`.trim(),
+          agentConfig.summary || undefined,
+        ].filter((part) => part !== undefined);
+        if (parts.length > 0) console.log(`\nProduced by: ${parts.join(" | ")}`);
+        if (agentConfig.envOverrides?.length) {
+          console.log(`Environment overrides in effect: ${agentConfig.envOverrides.join(", ")}`);
+        }
+      }
+      for (const warning of record.result?.warnings ?? []) console.log(`\nWarning: ${warning}`);
       return;
     }
     case "list": {

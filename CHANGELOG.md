@@ -4,6 +4,22 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+### Added
+
+- Every completed task now reports what produced it, under `result.agentConfig`: the agent's name and version from the ACP `initialize` response, and its session configuration options — model, reasoning level, mode — exactly as the agent reported them on `session/new`. A change the agent makes mid-run is folded in and flagged with `changedDuringRun`. There is deliberately no `model` field: the relay reports the agent's own option ids and values rather than claiming to know which one is the model, and an agent that advertises no configuration yields no options rather than a guess.
+- `agentConfig.envOverrides` names — never values — the forwarded `KIMI_MODEL_*` and `KIMI_CODE_HOME` variables that Kimi's documentation says can override which model answers, how hard it reasons, which endpoint receives the request, or where its configuration lives. It is the first place to look when a task ignored what was asked of it.
+
+### Fixed
+
+- `doctor` checked Kimi with the relay's full environment while the ACP spawn sanitizes it, so a green tick could reflect a variable the real task never sees. The Kimi check now uses the same restricted environment and says so. Git deliberately keeps the full environment: it is a host diagnostic.
+- Errors raised inside the ACP protocol were re-wrapped as a generic `KIMI_ACP_FAILED`, discarding the specific code and message — the sign-in instructions for an unauthenticated agent, the versions to align on a protocol mismatch, the result-size limit. They now reach the caller intact.
+- `KIMI_EXITED` reported an exit code and discarded the agent's stderr, which is the only place a dying agent explains itself.
+
+### Changed
+
+- The review skill no longer tells Claude to fall back to `baseRef: HEAD`, which suppressed the merge-base auto-selection added in 0.2.0 and put the empty-diff case back on the table.
+- THREAT_MODEL.md and README.md now document the `KIMI_*` environment channel that the allowlist has always forwarded.
+
 ## [0.2.0] - 2026-07-24
 
 ### Security

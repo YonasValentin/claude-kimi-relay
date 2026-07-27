@@ -15161,6 +15161,138 @@ function sanitizedAgentEnvironment(env = process.env) {
   );
 }
 
+// src/session-config.ts
+var MAX_OPTIONS = 32;
+var MAX_VALUES_PER_OPTION = 128;
+var MAX_STRING_LENGTH = 200;
+var MAX_CONFIG_CHANGE_EVENTS = 10;
+function asRecord(value) {
+  return typeof value === "object" && value !== null ? value : void 0;
+}
+function boundedString(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_STRING_LENGTH ? value : void 0;
+}
+function parseValues(input) {
+  if (!Array.isArray(input)) return [];
+  const values = [];
+  const push = (candidate) => {
+    const value = boundedString(candidate);
+    if (value !== void 0 && !values.includes(value)) values.push(value);
+  };
+  for (const entry of input) {
+    if (values.length >= MAX_VALUES_PER_OPTION) break;
+    const record2 = asRecord(entry);
+    if (record2 === void 0) continue;
+    const nested = record2.options;
+    if (Array.isArray(nested)) {
+      for (const inner of nested) {
+        if (values.length >= MAX_VALUES_PER_OPTION) break;
+        push(asRecord(inner)?.value);
+      }
+      continue;
+    }
+    push(record2.value);
+  }
+  return values;
+}
+function parseConfigOptions(input) {
+  if (!Array.isArray(input)) return [];
+  const parsed = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of input) {
+    if (parsed.length >= MAX_OPTIONS) break;
+    const record2 = asRecord(entry);
+    if (record2 === void 0) continue;
+    const id = boundedString(record2.id) ?? boundedString(record2.configId);
+    if (id === void 0 || seen.has(id)) continue;
+    let currentValue;
+    let values = [];
+    if (record2.type === "boolean") {
+      if (typeof record2.currentValue !== "boolean") continue;
+      currentValue = record2.currentValue ? "true" : "false";
+    } else if (record2.type === "select" || record2.type === void 0 || record2.type === null) {
+      currentValue = boundedString(record2.currentValue);
+      if (currentValue === void 0) continue;
+      values = parseValues(record2.options);
+    } else {
+      continue;
+    }
+    const category = boundedString(record2.category);
+    seen.add(id);
+    parsed.push({
+      id,
+      label: boundedString(record2.name) ?? id,
+      currentValue,
+      ...category === void 0 ? {} : { category },
+      values
+    });
+  }
+  return parsed;
+}
+function extractConfigOptions(update) {
+  const record2 = asRecord(update);
+  if (record2?.sessionUpdate !== "config_option_update") return void 0;
+  return parseConfigOptions(record2.configOptions);
+}
+function summarizeConfigOptions(options) {
+  return options.map((option) => `${option.label}=${option.currentValue}`).join(", ");
+}
+function toConfigSnapshot(options) {
+  return options.map(({ id, label, currentValue, category }) => ({
+    id,
+    name: label,
+    currentValue,
+    ...category === void 0 ? {} : { category }
+  }));
+}
+function describeConfigChange(before, after) {
+  const changes = [];
+  for (const option of after) {
+    const previous = before.find((candidate) => candidate.id === option.id);
+    if (previous === void 0) {
+      changes.push(`${option.label} appeared as ${option.currentValue}`);
+    } else if (previous.currentValue !== option.currentValue) {
+      changes.push(`${option.label} ${previous.currentValue} -> ${option.currentValue}`);
+    }
+  }
+  for (const option of before) {
+    if (!after.some((candidate) => candidate.id === option.id)) {
+      changes.push(`${option.label} is no longer offered`);
+    }
+  }
+  return changes.length === 0 ? void 0 : `Kimi changed its session config: ${changes.join("; ")}`;
+}
+var ConfigTracker = class {
+  current;
+  emitted = 0;
+  changed = false;
+  constructor(initial) {
+    this.current = initial;
+  }
+  get state() {
+    return this.current;
+  }
+  get changedDuringRun() {
+    return this.changed;
+  }
+  /**
+   * Folds a session update into the tracked state, returning a line to report
+   * when it changed something worth telling the user about.
+   */
+  observe(update) {
+    const next = extractConfigOptions(update);
+    if (next === void 0) return void 0;
+    if (next.length === 0) return void 0;
+    const description = describeConfigChange(this.current, next);
+    this.current = next;
+    if (description === void 0) return void 0;
+    this.changed = true;
+    if (this.emitted >= MAX_CONFIG_CHANGE_EVENTS) return void 0;
+    this.emitted += 1;
+    return description;
+  }
+};
+
 // src/version.ts
 var VERSION = "0.2.0";
 
@@ -15182,6 +15314,15 @@ function extractProgress(update) {
   }
   if (record2.sessionUpdate === "plan") return "Kimi updated its plan.";
   return void 0;
+}
+function environmentOverrides(env) {
+  return Object.keys(env).filter((key) => key.startsWith("KIMI_MODEL_") || key === "KIMI_CODE_HOME").sort();
+}
+function readAgentInfo(info) {
+  if (typeof info !== "object" || info === null) return void 0;
+  const record2 = info;
+  if (typeof record2.name !== "string") return void 0;
+  return { name: record2.name, version: typeof record2.version === "string" ? record2.version : "" };
 }
 var TERMINATE_GRACE_MS = 2e3;
 function signalChild(child, signal, group) {
@@ -15216,9 +15357,10 @@ var KimiAcpClient = class {
     const onExternalAbort = () => controller2.abort();
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
     const timeout = setTimeout(() => controller2.abort(), request.timeoutMs);
+    const agentEnv = sanitizedAgentEnvironment();
     const child = spawn2(this.config.kimiCliPath, [...this.config.kimiCliArgs ?? ["acp"]], {
       cwd: request.workspaceDir,
-      env: sanitizedAgentEnvironment(),
+      env: agentEnv,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       signal: controller2.signal,
@@ -15321,15 +15463,26 @@ ${diagnostic}` : ""}`,
             "ACP_VERSION_MISMATCH"
           );
         }
+        const agent = readAgentInfo(initializeResponse.agentInfo);
         return ctx.buildSession(request.workspaceDir).withSession(async (session) => {
-          await onProgress(`Kimi ACP session ${session.sessionId} started.`);
+          const tracker = new ConfigTracker(
+            parseConfigOptions(session.newSessionResponse.configOptions)
+          );
+          const introduction = [
+            `Kimi ACP session ${session.sessionId} started`,
+            agent === void 0 ? void 0 : `${agent.name} ${agent.version}`.trim(),
+            summarizeConfigOptions(tracker.state) || void 0
+          ].filter((part) => part !== void 0);
+          await onProgress(`${introduction.join(" | ")}.`);
           void session.prompt(request.prompt);
           for (; ; ) {
             const message = await session.nextUpdate();
             if (message.kind === "stop") {
               return {
                 response: message.response,
-                sessionId: session.sessionId
+                sessionId: session.sessionId,
+                agent,
+                tracker
               };
             }
             const text = extractText(message.notification.update);
@@ -15345,15 +15498,27 @@ ${diagnostic}` : ""}`,
             }
             const progress = extractProgress(message.notification.update);
             if (progress !== void 0) await onProgress(progress);
+            const configChange = tracker.observe(message.notification.update);
+            if (configChange !== void 0) await onProgress(configChange);
           }
         });
       });
       const result = await Promise.race([protocolResult, childFailure]);
       protocolFinished = true;
+      const envOverrides = environmentOverrides(agentEnv);
+      const options = toConfigSnapshot(result.tracker.state);
+      const agentConfig = options.length === 0 && result.agent === void 0 ? void 0 : {
+        summary: summarizeConfigOptions(result.tracker.state),
+        options,
+        ...result.agent === void 0 ? {} : { agent: result.agent },
+        ...envOverrides.length === 0 ? {} : { envOverrides },
+        ...result.tracker.changedDuringRun ? { changedDuringRun: true } : {}
+      };
       return {
         text: chunks.join("").trim(),
         stopReason: result.response.stopReason,
         sessionId: result.sessionId,
+        ...agentConfig === void 0 ? {} : { agentConfig },
         warnings: []
       };
     } catch (error40) {
@@ -16057,6 +16222,7 @@ var TaskRunner = class {
             sessionId: agentResult.sessionId,
             ...patchPath === void 0 ? {} : { patchPath },
             ...record2.keepWorkspace ? { workspacePath: prepared.path } : {},
+            ...agentResult.agentConfig === void 0 ? {} : { agentConfig: agentResult.agentConfig },
             warnings: [...prepared.warnings, ...agentResult.warnings]
           },
           events: capEvents([
