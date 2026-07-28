@@ -27978,6 +27978,7 @@ async function runDoctor(config3) {
 import { spawn as spawn3 } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { dirname as dirname5, join as join5, resolve as resolve4 } from "node:path";
+import { setTimeout as delay2 } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@agentclientprotocol/sdk/dist/schema/index.js
@@ -33172,6 +33173,21 @@ function validateRequest(request, config3) {
     ...thinkingEffort === void 0 ? {} : { thinkingEffort }
   };
 }
+var DEFAULT_POLL_INTERVAL_MS = 5e3;
+async function awaitTerminal(get, id, signal, report, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS) {
+  let progress = 0;
+  for (; ; ) {
+    const record2 = await get(id);
+    if (TERMINAL_STATUSES.has(record2.status) || signal.aborted) return record2;
+    progress += 1;
+    await report(progress, `${record2.status}: ${record2.events.at(-1)?.message ?? record2.status}`);
+    try {
+      await delay2(pollIntervalMs, void 0, { signal });
+    } catch {
+      return get(id);
+    }
+  }
+}
 var TaskService = class {
   constructor(config3) {
     this.config = config3;
@@ -33357,7 +33373,9 @@ server.registerTool(
       ),
       prompt: external_exports.string().min(3).max(1e5).describe("Complete instruction for the Kimi agent."),
       projectDir: external_exports.string().min(1).optional().describe("Absolute project path. Defaults to the plugin's CLAUDE_PROJECT_DIR."),
-      background: external_exports.boolean().default(true).describe("Run detached and poll with get_task, or block until the task finishes."),
+      background: external_exports.boolean().default(true).describe(
+        "Return the task id immediately, or block until the task finishes and return its result. The task itself always runs in a detached worker, so it survives a client restart either way; blocking only decides whether this call waits for it."
+      ),
       baseRef: external_exports.string().optional().describe(
         "Git revision used as the comparison baseline for review and challenge tasks. Omit to auto-select the merge-base with the branch's upstream."
       ),
@@ -33371,21 +33389,37 @@ server.registerTool(
       )
     })
   },
-  async (input) => text(
-    taskSummary(
-      await tasks.start({
-        kind: input.kind,
-        prompt: input.prompt,
-        projectDir: resolveProjectDir(input.projectDir),
-        background: input.background,
-        ...input.baseRef === void 0 ? {} : { baseRef: input.baseRef },
-        ...input.timeoutMs === void 0 ? {} : { timeoutMs: input.timeoutMs },
-        keepWorkspace: input.keepWorkspace,
-        ...input.model === void 0 ? {} : { model: input.model },
-        ...input.thinkingEffort === void 0 ? {} : { thinkingEffort: input.thinkingEffort }
-      })
-    )
-  )
+  async (input, extra) => {
+    const started = await tasks.start({
+      kind: input.kind,
+      prompt: input.prompt,
+      projectDir: resolveProjectDir(input.projectDir),
+      // Always detached, so a blocking call is still durable: the work outlives
+      // this process, and an interrupted call leaves a task that get_task can
+      // still report on rather than losing it.
+      background: true,
+      ...input.baseRef === void 0 ? {} : { baseRef: input.baseRef },
+      ...input.timeoutMs === void 0 ? {} : { timeoutMs: input.timeoutMs },
+      keepWorkspace: input.keepWorkspace,
+      ...input.model === void 0 ? {} : { model: input.model },
+      ...input.thinkingEffort === void 0 ? {} : { thinkingEffort: input.thinkingEffort }
+    });
+    if (input.background) return text(taskSummary(started));
+    const progressToken = extra._meta?.progressToken;
+    const finished = await awaitTerminal(
+      (id) => tasks.get(id),
+      started.id,
+      extra.signal,
+      async (progress, message) => {
+        if (progressToken === void 0) return;
+        await extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress, message }
+        });
+      }
+    );
+    return text(taskSummary(finished));
+  }
 );
 server.registerTool(
   "get_task",

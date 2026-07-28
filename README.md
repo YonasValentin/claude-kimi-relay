@@ -136,7 +136,9 @@ claude-kimi-relay apply <task-id> --project .
 
 `apply` runs `git apply --check` first, so a patch that would not apply cleanly never touches your project.
 
-Foreground and background differ by entry point. The MCP `start_task` tool runs in the background by default, so Claude Code returns a task ID immediately and you poll with `get_task`. The `claude-kimi-relay start` CLI runs in the foreground and blocks until the task finishes unless you pass `--background`.
+Foreground and background differ by what the caller does, not by where the work happens. Through MCP, `start_task` with `background: false` waits and hands back the finished result, reporting progress while it runs; with `background: true` it returns a task ID immediately and you poll with `get_task`. Either way the task itself runs in a detached worker, so it survives a client restart. The `/kimi-relay:*` skills wait by default, which is why Claude comes back with the review instead of a task ID.
+
+A waiting review can take minutes. Claude Code moves a tool call past two minutes into a background task on its own and delivers the result when it settles, so waiting does not block your session. The `claude-kimi-relay start` CLI runs in the foreground and blocks until the task finishes unless you pass `--background`.
 
 ## Task lifecycle
 

@@ -257,10 +257,10 @@ async function runDoctor(config2) {
 init_errors();
 
 // src/task-service.ts
-init_errors();
 import { spawn as spawn3 } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { dirname as dirname5, join as join5, resolve as resolve4 } from "node:path";
+init_errors();
 import { fileURLToPath } from "node:url";
 
 // node_modules/@agentclientprotocol/sdk/dist/schema/index.js

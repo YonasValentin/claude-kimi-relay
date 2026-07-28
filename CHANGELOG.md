@@ -4,6 +4,12 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+### Changed
+
+- A `start_task` call with `background: false` now blocks until the task settles and returns its result, and reports progress while it waits. Previously every call returned a task id immediately, so nothing marked the moment the agent finished and the caller had to poll `get_task` and guess when to look -- which is what made the plugin feel like a fire-and-forget shell rather than something Claude waits on. The skills for `review`, `challenge` and `delegate` now wait by default.
+- The progress notifications are load-bearing, not decoration: Claude Code aborts an MCP tool call that sends neither a response nor a progress notification for its idle window, 30 minutes for a stdio server, and a Kimi review can think for longer. They reset that idle timer; they do not extend the separate wall-clock limit, which is far larger than any task needs. Claude Code v2.1.212 and later also move a call past two minutes into a background task on their own, so waiting does not block the session.
+- A waiting call is still durable. The task always runs in a detached worker, so abandoning the wait -- or restarting the client -- leaves a task that `get_task` can still report on rather than losing the work.
+
 ## [0.4.0] - 2026-07-27
 
 ### Fixed

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import type { RelayConfig, TaskKind, TaskRecord, TaskRequest, TaskStatus } from "./types.js";
@@ -87,6 +88,47 @@ function validateRequest(request: TaskRequest, config: RelayConfig): ValidatedTa
     ...(model === undefined ? {} : { model }),
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
   };
+}
+
+// How often a blocking caller looks at the task record. The interval is not
+// about latency -- it is what keeps an MCP tool call alive. Claude Code aborts
+// a call that sends neither a response nor a progress notification for its idle
+// window, 30 minutes for a stdio server, and a Kimi review can think for longer
+// than that. Progress resets that idle timer; it does not extend the separate
+// wall-clock limit, which is far larger than any task needs.
+const DEFAULT_POLL_INTERVAL_MS = 5_000;
+
+/**
+ * Blocks until a task settles, reporting progress while it runs.
+ *
+ * Starting a task returns its id and nothing else, so nothing marks the moment
+ * the agent finished: a caller had to poll and guess when to look. Waiting here
+ * hands that back to the client, which already knows how to background a long
+ * call and deliver its result when it settles.
+ *
+ * The task keeps running if the caller goes away. It is executed by a detached
+ * worker and its record is durable, so an abandoned wait leaves a task that can
+ * still be read later rather than losing the work.
+ */
+export async function awaitTerminal(
+  get: (id: string) => Promise<TaskRecord>,
+  id: string,
+  signal: AbortSignal,
+  report: (progress: number, message: string) => Promise<void>,
+  pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS,
+): Promise<TaskRecord> {
+  let progress = 0;
+  for (;;) {
+    const record = await get(id);
+    if (TERMINAL_STATUSES.has(record.status) || signal.aborted) return record;
+    progress += 1;
+    await report(progress, `${record.status}: ${record.events.at(-1)?.message ?? record.status}`);
+    try {
+      await delay(pollIntervalMs, undefined, { signal });
+    } catch {
+      return get(id);
+    }
+  }
 }
 
 export class TaskService {
