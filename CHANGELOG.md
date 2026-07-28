@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog. This project uses Semantic Versioni
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-28
+
 ### Changed
 
 - A `start_task` call with `background: false` now blocks until the task settles and returns its result, and reports progress while it waits. Previously every call returned a task id immediately, so nothing marked the moment the agent finished and the caller had to poll `get_task` and guess when to look -- which is what made the plugin feel like a fire-and-forget shell rather than something Claude waits on. The skills for `review`, `challenge` and `delegate` now wait by default.
