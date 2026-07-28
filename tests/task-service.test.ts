@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 
 import { TaskStore } from "../src/store.js";
-import { TaskService } from "../src/task-service.js";
+import { TaskService, awaitTerminal } from "../src/task-service.js";
 import type { RelayConfig, TaskRecord } from "../src/types.js";
 
 const config = (dataDir: string): RelayConfig => ({
@@ -204,4 +204,79 @@ void test("a configuration request carrying a control character or padding is re
   await assert.rejects(service.start({ ...request, thinkingEffort: "x".repeat(201) }), {
     code: "INVALID_AGENT_CONFIG",
   });
+});
+
+function record(status: TaskRecord["status"], message: string): TaskRecord {
+  return makeRecord({
+    status,
+    events: [{ at: "2026-01-01T00:00:00.000Z", status, message }],
+  });
+}
+
+void test("awaitTerminal blocks until the task settles and reports progress while it waits", async () => {
+  // Starting a task hands back an id and nothing else, so nothing marked the
+  // moment the agent finished -- a caller had to poll and guess when to look.
+  // The progress reports are not decoration either: an MCP client aborts a tool
+  // call that goes its whole idle window with neither a response nor progress.
+  const pending = [
+    record("preparing_workspace", "Creating isolated repository copy."),
+    record("running", "Kimi is working in the isolated workspace."),
+  ];
+  const settled = record("completed", "Task completed.");
+  let call = 0;
+  const reported: [number, string][] = [];
+
+  const finished = await awaitTerminal(
+    () => Promise.resolve(pending[call++] ?? settled),
+    "id",
+    new AbortController().signal,
+    (progress, message) => {
+      reported.push([progress, message]);
+      return Promise.resolve();
+    },
+    1,
+  );
+
+  assert.equal(finished.status, "completed");
+  // Progress must strictly increase: the protocol requires it, and a client
+  // that dedupes on the value would otherwise stop resetting its idle timer.
+  assert.deepEqual(
+    reported.map(([progress]) => progress),
+    [1, 2],
+  );
+  assert.match(reported[0]?.[1] ?? "", /preparing_workspace: Creating isolated/u);
+});
+
+void test("awaitTerminal returns on a failed task rather than waiting forever", async () => {
+  const finished = await awaitTerminal(
+    () => Promise.resolve(record("timed_out", "Kimi task timed out.")),
+    "id",
+    new AbortController().signal,
+    () => Promise.resolve(),
+    1,
+  );
+
+  assert.equal(finished.status, "timed_out");
+});
+
+void test("awaitTerminal stops waiting when the caller aborts, leaving the task running", async () => {
+  // The work is done by a detached worker and the record is durable, so an
+  // abandoned wait must not kill the task -- it stays readable afterwards.
+  const controller = new AbortController();
+  let calls = 0;
+
+  const finished = await awaitTerminal(
+    () => {
+      calls += 1;
+      if (calls === 2) controller.abort();
+      return Promise.resolve(record("running", "Kimi is working."));
+    },
+    "id",
+    controller.signal,
+    () => Promise.resolve(),
+    1,
+  );
+
+  assert.equal(finished.status, "running");
+  assert.ok(calls <= 3, `expected the wait to stop promptly, made ${calls} reads`);
 });

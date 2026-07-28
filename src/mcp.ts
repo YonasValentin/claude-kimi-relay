@@ -7,7 +7,7 @@ import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { RelayError } from "./errors.js";
-import { TaskService } from "./task-service.js";
+import { TaskService, awaitTerminal } from "./task-service.js";
 import type { TaskRecord } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -76,7 +76,9 @@ server.registerTool(
       background: z
         .boolean()
         .default(true)
-        .describe("Run detached and poll with get_task, or block until the task finishes."),
+        .describe(
+          "Return the task id immediately, or block until the task finishes and return its result. The task itself always runs in a detached worker, so it survives a client restart either way; blocking only decides whether this call waits for it.",
+        ),
       baseRef: z
         .string()
         .optional()
@@ -110,22 +112,38 @@ server.registerTool(
         ),
     }),
   },
-  async (input) =>
-    text(
-      taskSummary(
-        await tasks.start({
-          kind: input.kind,
-          prompt: input.prompt,
-          projectDir: resolveProjectDir(input.projectDir),
-          background: input.background,
-          ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-          ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-          keepWorkspace: input.keepWorkspace,
-          ...(input.model === undefined ? {} : { model: input.model }),
-          ...(input.thinkingEffort === undefined ? {} : { thinkingEffort: input.thinkingEffort }),
-        }),
-      ),
-    ),
+  async (input, extra) => {
+    const started = await tasks.start({
+      kind: input.kind,
+      prompt: input.prompt,
+      projectDir: resolveProjectDir(input.projectDir),
+      // Always detached, so a blocking call is still durable: the work outlives
+      // this process, and an interrupted call leaves a task that get_task can
+      // still report on rather than losing it.
+      background: true,
+      ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      keepWorkspace: input.keepWorkspace,
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.thinkingEffort === undefined ? {} : { thinkingEffort: input.thinkingEffort }),
+    });
+    if (input.background) return text(taskSummary(started));
+
+    const progressToken = extra._meta?.progressToken;
+    const finished = await awaitTerminal(
+      (id) => tasks.get(id),
+      started.id,
+      extra.signal,
+      async (progress, message) => {
+        if (progressToken === undefined) return;
+        await extra.sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress, message },
+        });
+      },
+    );
+    return text(taskSummary(finished));
+  },
 );
 
 server.registerTool(
