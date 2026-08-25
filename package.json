@@ -60,6 +60,7 @@
     "c8": "^12.0.0",
     "esbuild": "^0.25.8",
     "eslint": "^10.8.0",
+    "eslint-plugin-secure-coding": "5.1.3",
     "eslint-plugin-security": "^4.0.1",
     "globals": "17.7.0",
     "prettier": "^3.6.2",
