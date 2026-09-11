@@ -1,3 +1,4 @@
+import { isSensitivePath } from "./fs-security.js";
 import type { PermissionContext, PermissionOptionLike, PermissionRequestLike } from "./types.js";
 
 const DENY_ALWAYS = [
@@ -14,10 +15,8 @@ const DENY_ALWAYS = [
   /\bmkfs\b|\bdd\s+if=/iu,
   /\bshutdown\b|\breboot\b|\bpoweroff\b/iu,
   /\/etc\/(?:passwd|shadow|sudoers)/iu,
-  /\.ssh[/\\]/iu,
-  /\.aws[/\\]/iu,
-  /\.gnupg[/\\]/iu,
-  /(?:^|[/\\])\.env(?:\.|$)/iu,
+  // NOTE: path-shaped rules (.env, .ssh/, .aws/, .gnupg/, ...) deliberately do NOT
+  // live in this list -- see pathTokens() below for why, and for where they moved.
   /credential|private[_-]?key|secret[_-]?key/iu,
 ];
 
@@ -54,6 +53,41 @@ const SHELL_CHAIN = /(?:>>?|\||;|&|`|\$\(|\\n|\\r)/u;
 // silently failed OPEN. Un-inspectable requests are now rejected (fail closed),
 // matching how review mode refuses anything it cannot positively classify.
 const MAX_INSPECTABLE_BYTES = 100_000;
+
+// DENY_ALWAYS patterns are tested against a JSON blob, where `^` and `$` mean
+// "start/end of the serialized object", not "start/end of a path". Path-shaped
+// rules therefore cannot be written inline here: `/(?:^|[/\\])\.env(?:\.|$)/`
+// could only ever fire when a separator happened to precede the name AND a
+// suffix followed it, so a bare `cat .env` was allowed -- in delegate mode,
+// where this list is the only content gate. Instead recover the candidate path
+// tokens and hand them to the one already-tested authority on sensitive paths,
+// fs-security.isSensitivePath -- the same function the workspace filter and the
+// ACP fs bridge use, so all three layers agree on what counts as a secret.
+//
+// This is not a sandbox and cannot become one: a shell can still split a name
+// across quotes (`cat .e""nv`). See THREAT_MODEL.md -- untrusted repositories
+// still warrant OS-level isolation.
+const JSON_ESCAPE = /\\(.)/gsu;
+const WHITESPACE_ESCAPE = new Map([
+  ["n", " "],
+  ["r", " "],
+  ["t", " "],
+  ["b", " "],
+  ["f", " "],
+]);
+const TOKEN_SEPARATOR = /[\s"'`=<>|;&,(){}[\]]+/u;
+
+function pathTokens(description: string): readonly string[] {
+  // Single left-to-right pass: the blob's `\"` becomes a separator and `\\`
+  // becomes a Windows separator. Two sequential replaces mis-handle `cat ".env"`.
+  return description
+    .replace(
+      JSON_ESCAPE,
+      (_match, character: string) => WHITESPACE_ESCAPE.get(character) ?? character,
+    )
+    .split(TOKEN_SEPARATOR)
+    .filter(Boolean);
+}
 
 function serializeRequest(request: PermissionRequestLike): string | undefined {
   try {
@@ -102,6 +136,10 @@ export class PermissionPolicy {
     }
 
     if (DENY_ALWAYS.some((pattern) => pattern.test(description))) {
+      return this.cancelOrDeny(request.options);
+    }
+
+    if (pathTokens(description).some(isSensitivePath)) {
       return this.cancelOrDeny(request.options);
     }
 

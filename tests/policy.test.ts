@@ -152,3 +152,95 @@ void test("review denies safe-read verbs that write via flags, binaries, or non-
     assert.deepEqual(result, { outcome: "selected", optionId: "deny" }, JSON.stringify(command));
   }
 });
+
+// --- R8R regression matrix -------------------------------------------------
+// The `.env` entry in DENY_ALWAYS was unreachable for the exact filename: the
+// patterns are tested against JSON.stringify(toolCall), where `^`/`$` anchor to
+// the serialized object rather than to a path, so `cat .env` was ALLOWED in both
+// modes -- including delegate, where the deny list is the only content gate.
+// Only `cat ./.env.local` (asserted above) happened to match, which is why the
+// defect shipped. These cases lock the whole contract down in both directions.
+
+const decide = (
+  toolCall: Record<string, unknown>,
+  mode: "review" | "delegate",
+): string | undefined => {
+  const result = policy.decide({ toolCall, options }, { mode, workspaceDir: "/tmp/workspace" });
+  return result.outcome === "selected" ? result.optionId : undefined;
+};
+
+void test("sensitive paths are denied in both modes, however the command spells them", () => {
+  const denied = [
+    "cat .env",
+    "cat ./.env",
+    "cat /repo/.env",
+    "cat .env.local",
+    "cat ./.env.local",
+    "cat C:\\repo\\.env",
+    'cat ".env"',
+    "cat '.env'",
+    "echo x >.env",
+    "cat ../.env",
+    "cat $HOME/.env",
+    "cat .env.production",
+    "grep -r KEY /srv/app/.env",
+    "cat notes.md; cat .env",
+    "cat .env > /tmp/out",
+    "cat .env|base64",
+    "cat \\repo\\.env.local",
+    // Secret classes the workspace filter and the ACP fs bridge already block;
+    // the policy layer now agrees with them instead of knowing a weaker subset.
+    "cat .ssh/id_rsa",
+    "cat ~/.aws/credentials",
+    "cat kubeconfig",
+    "cat server.pem",
+  ];
+  for (const command of denied) {
+    for (const mode of ["review", "delegate"] as const) {
+      assert.equal(
+        decide({ title: "Run command", rawInput: { command } }, mode),
+        "deny",
+        `${mode}: ${command}`,
+      );
+    }
+  }
+});
+
+void test("sensitive paths are denied in both modes when supplied as a structured path", () => {
+  for (const path of [".env", "C:\\repo\\.env", "src/config/.env.local"]) {
+    for (const mode of ["review", "delegate"] as const) {
+      assert.equal(decide({ title: "Read", rawInput: { path } }, mode), "deny", `${mode}: ${path}`);
+    }
+  }
+});
+
+void test("non-secret lookalikes are not blocked -- this is not a substring ban on 'env'", () => {
+  // .env.example/.sample/.template are ordinary repo files; this repository
+  // ships one. fs-security.ts allows them deliberately, and the policy layer
+  // must not disagree with the layer that decides what enters the workspace.
+  const allowedReads = [
+    "cat .env.example",
+    "cat .env.sample",
+    "cat .env.template",
+    "cat .environment",
+    "cat foo.env",
+    "cat src/env.ts",
+    "grep env README.md",
+    "cat environment.yml",
+  ];
+  for (const command of allowedReads) {
+    for (const mode of ["review", "delegate"] as const) {
+      assert.equal(
+        decide({ title: "Run command", rawInput: { command } }, mode),
+        "allow",
+        `${mode}: ${command}`,
+      );
+    }
+  }
+  // A write is still a write in review mode -- checked in delegate only, where
+  // the deny list is the sole content gate.
+  assert.equal(decide({ title: "Edit src/dotenv-loader.ts" }, "delegate"), "allow");
+  for (const path of [".env.example", "src/environment.ts"]) {
+    assert.equal(decide({ title: "Read", rawInput: { path } }, "delegate"), "allow", path);
+  }
+});

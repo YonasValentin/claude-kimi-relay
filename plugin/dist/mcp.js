@@ -27796,7 +27796,8 @@ function loadConfig(env = process.env) {
 
 // src/doctor.ts
 import { constants } from "node:fs";
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir as homedir2 } from "node:os";
 import { join as join2 } from "node:path";
 
 // src/process.ts
@@ -27955,6 +27956,53 @@ async function stateDirectoryCheck(config3) {
     };
   }
 }
+var AGENT_CONFIG_PATH = join2(homedir2(), ".kimi-code", "config.toml");
+var PERMISSIVE_MODES = /* @__PURE__ */ new Set(["auto", "yolo"]);
+var PERMISSION_MODE_KEY = /^\s*default_permission_mode\s*=\s*["']?([A-Za-z_-]+)["']?/u;
+var LEGACY_YOLO_KEY = /^\s*default_yolo\s*=\s*(true|false)\b/iu;
+function agentPermissionModeFindings(configToml) {
+  const findings = [];
+  for (const line of configToml.split(/\r?\n/u)) {
+    const mode = PERMISSION_MODE_KEY.exec(line);
+    if (mode && PERMISSIVE_MODES.has((mode[1] ?? "").toLowerCase())) {
+      findings.push(`default_permission_mode = ${(mode[1] ?? "").toLowerCase()}`);
+    }
+    const legacy = LEGACY_YOLO_KEY.exec(line);
+    if (legacy && (legacy[1] ?? "").toLowerCase() === "true") {
+      findings.push("default_yolo = true");
+    }
+  }
+  return findings;
+}
+async function agentPermissionModeCheck() {
+  const name = "Agent permission mode";
+  let configToml;
+  try {
+    configToml = await readFile(AGENT_CONFIG_PATH, "utf8");
+  } catch (error40) {
+    if (error40.code === "ENOENT") {
+      return { name, ok: true, detail: `no ${AGENT_CONFIG_PATH} (agent default not overridden)` };
+    }
+    return {
+      name,
+      ok: false,
+      detail: `cannot read ${AGENT_CONFIG_PATH}: ${error40 instanceof Error ? error40.message : String(error40)}`
+    };
+  }
+  const findings = agentPermissionModeFindings(configToml);
+  if (findings.length > 0) {
+    return {
+      name,
+      ok: false,
+      detail: `${findings.join(", ")} in ${AGENT_CONFIG_PATH} -- the agent auto-approves, so the relay permission policy is never consulted`
+    };
+  }
+  return {
+    name,
+    ok: true,
+    detail: `no permissive default_permission_mode/default_yolo in ${AGENT_CONFIG_PATH} (declared configuration only, not runtime proof)`
+  };
+}
 async function runDoctor(config3) {
   const checks = [];
   checks.push({
@@ -27971,6 +28019,7 @@ async function runDoctor(config3) {
   );
   checks.push({ ...kimi, detail: `${kimi.detail} ${RESTRICTED_ENV_NOTE}` });
   checks.push(await stateDirectoryCheck(config3));
+  checks.push(await agentPermissionModeCheck());
   return checks;
 }
 
@@ -31680,7 +31729,7 @@ var legacyClientNotificationMethods = /* @__PURE__ */ new Set([
 // src/acp-client.ts
 import { spawn as spawn2 } from "node:child_process";
 import { once } from "node:events";
-import { mkdir as mkdir2, readFile, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir2, readFile as readFile2, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname2 } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
@@ -31774,10 +31823,8 @@ var DENY_ALWAYS = [
   /\bmkfs\b|\bdd\s+if=/iu,
   /\bshutdown\b|\breboot\b|\bpoweroff\b/iu,
   /\/etc\/(?:passwd|shadow|sudoers)/iu,
-  /\.ssh[/\\]/iu,
-  /\.aws[/\\]/iu,
-  /\.gnupg[/\\]/iu,
-  /(?:^|[/\\])\.env(?:\.|$)/iu,
+  // NOTE: path-shaped rules (.env, .ssh/, .aws/, .gnupg/, ...) deliberately do NOT
+  // live in this list -- see pathTokens() below for why, and for where they moved.
   /credential|private[_-]?key|secret[_-]?key/iu
 ];
 var MUTATION_HINTS = [
@@ -31797,6 +31844,21 @@ var SAFE_REVIEW_HINTS = [
 ];
 var SHELL_CHAIN = /(?:>>?|\||;|&|`|\$\(|\\n|\\r)/u;
 var MAX_INSPECTABLE_BYTES = 1e5;
+var JSON_ESCAPE = /\\(.)/gsu;
+var WHITESPACE_ESCAPE = /* @__PURE__ */ new Map([
+  ["n", " "],
+  ["r", " "],
+  ["t", " "],
+  ["b", " "],
+  ["f", " "]
+]);
+var TOKEN_SEPARATOR = /[\s"'`=<>|;&,(){}[\]]+/u;
+function pathTokens(description) {
+  return description.replace(
+    JSON_ESCAPE,
+    (_match, character) => WHITESPACE_ESCAPE.get(character) ?? character
+  ).split(TOKEN_SEPARATOR).filter(Boolean);
+}
 function serializeRequest(request) {
   try {
     const serialized = JSON.stringify(request.toolCall ?? {});
@@ -31823,6 +31885,9 @@ var PermissionPolicy = class {
       return this.cancelOrDeny(request.options);
     }
     if (DENY_ALWAYS.some((pattern) => pattern.test(description))) {
+      return this.cancelOrDeny(request.options);
+    }
+    if (pathTokens(description).some(isSensitivePath)) {
       return this.cancelOrDeny(request.options);
     }
     if (context.mode === "review") {
@@ -32240,7 +32305,7 @@ ${diagnostic}` : ""}`,
         const params = ctx.params;
         const path = await resolveInsideRoot(request.workspaceDir, params.path);
         await assertRegularFile(path, this.config.maxFileBytes);
-        const text2 = await readFile(path, "utf8");
+        const text2 = await readFile2(path, "utf8");
         const lines = text2.split("\n");
         const line = Math.max(1, params.line ?? 1);
         const limit = Math.max(1, Math.min(params.limit ?? lines.length, 2e4));
@@ -32445,7 +32510,7 @@ ${userPrompt}`;
 
 // src/store.ts
 import { randomUUID } from "node:crypto";
-import { open, mkdir as mkdir3, readFile as readFile2, readdir, rename, rm as rm2, stat as stat2, writeFile as writeFile3 } from "node:fs/promises";
+import { open, mkdir as mkdir3, readFile as readFile3, readdir, rename, rm as rm2, stat as stat2, writeFile as writeFile3 } from "node:fs/promises";
 import { dirname as dirname3, join as join3 } from "node:path";
 var LOCK_TIMEOUT_MS = 1e4;
 var STALE_LOCK_MS = 6e4;
@@ -32508,7 +32573,7 @@ var TaskStore = class {
   // Compare-and-delete: only remove the lock if it still carries our token. If
   // an over-long stall let another holder steal it, we must not delete theirs.
   async releaseLock(path, token) {
-    const current = await readFile2(path, "utf8").catch(() => void 0);
+    const current = await readFile3(path, "utf8").catch(() => void 0);
     if (current === token) await rm2(path, { force: true }).catch(() => void 0);
   }
   // A stale lock is only reclaimed when its recorded holder is actually gone.
@@ -32523,7 +32588,7 @@ var TaskStore = class {
     return true;
   }
   async holderAlive(path) {
-    const raw = await readFile2(path, "utf8").catch(() => "");
+    const raw = await readFile3(path, "utf8").catch(() => "");
     const pid = Number.parseInt(raw.split(":")[0] ?? "", 10);
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
@@ -32564,7 +32629,7 @@ var TaskStore = class {
   }
   async get(id) {
     try {
-      const contents = await readFile2(this.taskPath(id), "utf8");
+      const contents = await readFile3(this.taskPath(id), "utf8");
       return JSON.parse(contents);
     } catch (error40) {
       throw new RelayError(`Task ${id} was not found or is unreadable.`, "TASK_NOT_FOUND", {
@@ -32591,7 +32656,7 @@ var TaskStore = class {
     const records = await Promise.all(
       names.map(async (name) => {
         try {
-          return JSON.parse(await readFile2(join3(this.tasksDir, name), "utf8"));
+          return JSON.parse(await readFile3(join3(this.tasksDir, name), "utf8"));
         } catch {
           return void 0;
         }
