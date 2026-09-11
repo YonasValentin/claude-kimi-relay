@@ -14996,10 +14996,8 @@ var DENY_ALWAYS = [
   /\bmkfs\b|\bdd\s+if=/iu,
   /\bshutdown\b|\breboot\b|\bpoweroff\b/iu,
   /\/etc\/(?:passwd|shadow|sudoers)/iu,
-  /\.ssh[/\\]/iu,
-  /\.aws[/\\]/iu,
-  /\.gnupg[/\\]/iu,
-  /(?:^|[/\\])\.env(?:\.|$)/iu,
+  // NOTE: path-shaped rules (.env, .ssh/, .aws/, .gnupg/, ...) deliberately do NOT
+  // live in this list -- see pathTokens() below for why, and for where they moved.
   /credential|private[_-]?key|secret[_-]?key/iu
 ];
 var MUTATION_HINTS = [
@@ -15019,6 +15017,21 @@ var SAFE_REVIEW_HINTS = [
 ];
 var SHELL_CHAIN = /(?:>>?|\||;|&|`|\$\(|\\n|\\r)/u;
 var MAX_INSPECTABLE_BYTES = 1e5;
+var JSON_ESCAPE = /\\(.)/gsu;
+var WHITESPACE_ESCAPE = /* @__PURE__ */ new Map([
+  ["n", " "],
+  ["r", " "],
+  ["t", " "],
+  ["b", " "],
+  ["f", " "]
+]);
+var TOKEN_SEPARATOR = /[\s"'`=<>|;&,(){}[\]]+/u;
+function pathTokens(description) {
+  return description.replace(
+    JSON_ESCAPE,
+    (_match, character) => WHITESPACE_ESCAPE.get(character) ?? character
+  ).split(TOKEN_SEPARATOR).filter(Boolean);
+}
 function serializeRequest(request) {
   try {
     const serialized = JSON.stringify(request.toolCall ?? {});
@@ -15045,6 +15058,9 @@ var PermissionPolicy = class {
       return this.cancelOrDeny(request.options);
     }
     if (DENY_ALWAYS.some((pattern) => pattern.test(description))) {
+      return this.cancelOrDeny(request.options);
+    }
+    if (pathTokens(description).some(isSensitivePath)) {
       return this.cancelOrDeny(request.options);
     }
     if (context.mode === "review") {

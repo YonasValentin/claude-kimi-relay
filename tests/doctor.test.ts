@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { meetsNodeFloor, runDoctor } from "../src/doctor.js";
+import { agentPermissionModeFindings, meetsNodeFloor, runDoctor } from "../src/doctor.js";
 import type { RelayConfig } from "../src/types.js";
 
 const config = (dataDir: string, kimiCliPath: string): RelayConfig => ({
@@ -75,3 +75,29 @@ void test(
     assert.doesNotMatch(kimi.detail, /SECRET_DOCTOR_PROBE/u);
   },
 );
+
+void test("doctor flags an agent configured to auto-approve, which bypasses the relay policy", () => {
+  // With default_permission_mode = yolo/auto the agent stops sending
+  // session/requestPermission entirely, so PermissionPolicy is never consulted
+  // and every control in policy.ts becomes a no-op. The relay cannot force the
+  // agent to ask -- there is no session/set_mode -- so the least it can do is
+  // make the drift visible before a task runs.
+  for (const toml of [
+    'default_permission_mode = "yolo"',
+    "default_permission_mode = auto",
+    "[agent]\ndefault_yolo = true\n",
+  ]) {
+    assert.notEqual(agentPermissionModeFindings(toml).length, 0, JSON.stringify(toml));
+  }
+});
+
+void test("doctor does not flag a default or explicitly non-permissive agent config", () => {
+  for (const toml of [
+    "",
+    'default_permission_mode = "default"\n',
+    "default_yolo = false\n",
+    '[providers.moonshot]\napi_key = "not-a-permission-setting"\n',
+  ]) {
+    assert.deepEqual(agentPermissionModeFindings(toml), [], JSON.stringify(toml));
+  }
+});
